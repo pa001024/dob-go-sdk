@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"os"
 
-	dob "dob"
+	dob "github.com/pa001024/dob-go-sdk"
 )
 
 // EngineTables 是 Engine 用的 8 张标准表。

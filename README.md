@@ -7,7 +7,7 @@ dna-builder 后端服务 + 数据包 + 纯表达式计算的 Go SDK（与 `sdk/p
 - **计算**：纯 BD JSON（CharSettings + charId）进，目标值出。attrs/面板/技能表/伤害乘区全由引擎自算，真实 BD 42 个表达式与 bun 真机逐位一致（与 Python 共享 `sdk/python/tests/golden` 同一套 fixtures）。
 
 ```go
-import dob "dob"
+import dob "github.com/pa001024/dob-go-sdk"
 
 backend := dob.NewBackendClient("", 0) // 默认 https://api.dna-builder.cn
 gamedata := dob.NewGameDataClient(backend)

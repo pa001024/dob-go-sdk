@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"os"
 
-	dob "dob"
+	dob "github.com/pa001024/dob-go-sdk"
 )
 
 var goldenDir = "../python/tests/golden"
