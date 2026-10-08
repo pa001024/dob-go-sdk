@@ -7,7 +7,7 @@ import (
 )
 
 // TraceLevelRe 溯源文本的技能等级加成。
-var TraceLevelRe = regexp.MustCompile(`\[([^\]]+)\]等级\+(\d+)`)
+var TraceLevelRe = regexp.MustCompile(`\[([^\]]+)\]\s*等级\s*\+\s*(\d+)`)
 
 // LegacySlotKeys 同律槽位在 settings 中的键。
 var LegacySlotKeys = map[string]string{"角色": "charMods", "近战": "meleeMods", "远程": "rangedMods", "同律": "skillWeaponMods"}
