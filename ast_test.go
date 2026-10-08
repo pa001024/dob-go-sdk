@@ -141,3 +141,26 @@ func TestMacrosAndErrors(t *testing.T) {
 		t.Errorf("空表达式应抛错")
 	}
 }
+
+func TestParseFloatPrefix(t *testing.T) {
+	// 镜像 JS parseFloat（TS parseFactor 语义）：畸形数字取最长合法前缀。
+	// 线上真实用例：BD 自定义变量 "1+0.0.0039*0.3"（用户笔误多写了 0.）。
+	cases := []struct {
+		expr string
+		want float64
+	}{
+		{"0.0.0039", 0},
+		{"1+0.0.0039*0.3", 1},
+		{"3.14", 3.14},
+		// 与 TS 逐项一致：".5"/"1e3" 在 TS 里根本不是数字（求值兜底为 0），
+		// "Infinity" 是未定义标识符（按未知变量计 0）。
+		{".5", 0},
+		{"1e3", 0},
+		{"Infinity", 0},
+	}
+	for _, c := range cases {
+		if got := Evaluate(c.expr, nil, nil, nil, nil, nil, nil); got != c.want {
+			t.Errorf("%s: got %v want %v", c.expr, got, c.want)
+		}
+	}
+}

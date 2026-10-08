@@ -3,6 +3,8 @@ package dob
 
 import (
 	"fmt"
+	"math"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -12,6 +14,34 @@ import (
 type AstError struct{ Msg string }
 
 func (e *AstError) Error() string { return e.Msg }
+
+// jsFloatRe 是 JS parseFloat 可接受的最长数字前缀（TS parseFactor 用 parseFloat
+// 转 NUMBER token，如 parseFloat("0.0.0039") === 0；strconv 严格语义会报错，必须镜像）。
+var jsFloatRe = regexp.MustCompile(`^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?`)
+
+// jsParseFloat 镜像 JS parseFloat：取最长合法前缀，无有效前缀返回 NaN。
+func jsParseFloat(s string) float64 {
+	t := strings.TrimLeftFunc(s, unicode.IsSpace)
+	rest := t
+	if strings.HasPrefix(rest, "+") || strings.HasPrefix(rest, "-") {
+		rest = rest[1:]
+	}
+	if strings.HasPrefix(rest, "Infinity") {
+		if strings.HasPrefix(t, "-") {
+			return math.Inf(-1)
+		}
+		return math.Inf(1)
+	}
+	m := jsFloatRe.FindString(t)
+	if m == "" {
+		return math.NaN()
+	}
+	f, err := strconv.ParseFloat(m, 64)
+	if err != nil {
+		return math.NaN()
+	}
+	return f
+}
 
 // TokKind 词法记号类型。
 type TokKind string
@@ -284,10 +314,7 @@ func (p *astParser) unary() (*Node, error) {
 func (p *astParser) factor() (*Node, error) {
 	var node *Node
 	if p.match(TokNumber, "") {
-		f, err := strconv.ParseFloat(p.prev().Value, 64)
-		if err != nil {
-			return nil, &AstError{Msg: fmt.Sprintf("非法数字 '%s'", p.prev().Value)}
-		}
+		f := jsParseFloat(p.prev().Value)
 		node = &Node{Type: NodeNumber, Value: f}
 	} else if p.match(TokIdent, "") {
 		name := p.prev().Value
