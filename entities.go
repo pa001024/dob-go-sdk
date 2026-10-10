@@ -11,14 +11,20 @@ import (
 // ModQualityMaxLevel 品质 → MOD 满级。
 var ModQualityMaxLevel = map[string]int{"金": 10, "紫": 5, "蓝": 5, "绿": 3, "白": 3}
 
-// ModExclude 非属性键。
-var ModExclude = map[string]bool{
-	"id": true, "系列": true, "品质": true, "耐受": true, "类型": true, "名称": true,
-	"描述": true, "限定": true, "极性": true, "属性": true, "消耗": true, "技能替换": true,
-	"_等级": true, "_originalModData": true, "buff": true, "buffLv": true, "maxLevel": true,
-	"生效": true, "效果": true, "code": true, "count": true, "icon": true, "版本": true,
-	"buffProps": true, "_effectAppliedKeys": true,
+// ModMetaKeys MOD 原始数据中的非属性元信息键。
+//
+// 词条数值只从 `加成` 读取（含兼容折叠的旧格式顶层直挂数值），其余顶层键均为元信息。
+// 此表仅用于兼容旧格式数据包（如仍把数值挂在顶层的包）：构造时把这类遗留直挂数值折叠进加成，
+// 此后统一按加成口径计算，不再枚举实例自有键反推属性。
+var ModMetaKeys = map[string]bool{
+	"id": true, "icon": true, "名称": true, "版本": true, "系列": true, "品质": true,
+	"极性": true, "耐受": true, "类型": true, "属性": true, "限定": true, "描述": true,
+	"效果": true, "消耗": true, "技能替换": true, "buff": true, "生效": true,
+	"加成": true,
 }
+
+// ModExclude 非属性键（已废弃：ModMetaKeys 的别名，仅为兼容保留）。
+var ModExclude = ModMetaKeys
 
 // BuffExclude 非属性键。
 var BuffExclude = map[string]bool{
@@ -167,6 +173,98 @@ func BuffIsLayerProp(raw map[string]any, prop string) bool {
 	return ok
 }
 
+// modBonus 解析原始 MOD 数据的词条加成（复刻 TS 加成口径）。
+// 加成表优先采用 `加成`，旧格式顶层直挂的数值/数值数组折叠补入。
+// 返回新对象，不污染上游静态数据。
+func modBonus(raw map[string]any) map[string]any {
+	bonus := map[string]any{}
+	if b, ok := raw["加成"].(map[string]any); ok && b != nil {
+		for k, v := range b {
+			bonus[k] = v
+		}
+	}
+	for k, v := range raw {
+		if ModMetaKeys[k] {
+			continue
+		}
+		if _, dup := bonus[k]; dup {
+			continue
+		}
+		if IsNum(v) {
+			bonus[k] = v
+			continue
+		}
+		if l, ok := v.([]any); ok {
+			allNum := true
+			for _, e := range l {
+				if !IsNum(e) {
+					allNum = false
+					break
+				}
+			}
+			if allNum {
+				bonus[k] = append([]any{}, l...)
+			}
+		}
+	}
+	return bonus
+}
+
+// modBonusValue 计算词条属性在当前等级下的值（复刻 TS calculateBonusValue）。
+// 数组按等级取各档绝对值（单元素为定值，越界取边界值）；数值按线性缩放。
+func modBonusValue(prop string, maxValue V, lv, maxLevel int) (float64, bool) {
+	if l, ok := maxValue.([]any); ok {
+		if len(l) == 0 {
+			return 0, false
+		}
+		idx := lv
+		if idx < 0 {
+			idx = 0
+		}
+		if idx > len(l)-1 {
+			idx = len(l) - 1
+		}
+		return Num(l[idx]), true
+	}
+	if !IsNum(maxValue) {
+		return 0, false
+	}
+	value := (Num(maxValue) / float64(maxLevel+1)) * float64(lv+1)
+	if prop == "神智回复" || prop == "最大耐受" {
+		value = math.Ceil(value)
+	}
+	return value, true
+}
+
+// modAttrKeys 取实例持有的 MOD 层属性键（显式键表，不枚举实例自有键）。
+func modAttrKeys(inst map[string]any) []string {
+	if l, ok := inst["_attrKeys"].([]string); ok && l != nil {
+		return l
+	}
+	return []string{}
+}
+
+// modAttrAdd 登记 MOD 层属性键（幂等）。
+func modAttrAdd(inst map[string]any, key string) {
+	for _, k := range modAttrKeys(inst) {
+		if k == key {
+			return
+		}
+	}
+	inst["_attrKeys"] = append(modAttrKeys(inst), key)
+}
+
+// modAttrDel 移除 MOD 层属性键登记。
+func modAttrDel(inst map[string]any, key string) {
+	cur := modAttrKeys(inst)
+	out := make([]string, 0, len(cur))
+	for _, k := range cur {
+		if k != key {
+			out = append(out, k)
+		}
+	}
+	inst["_attrKeys"] = out
+}
 // LevelMod 复刻 LeveledMod 构造 + updateProperties。
 func LevelMod(raw map[string]any, level, buffLv V, effectRaw map[string]any) map[string]any {
 	maxLevel := ModQualityMaxLevel[S(raw, "品质")]
@@ -176,7 +274,7 @@ func LevelMod(raw map[string]any, level, buffLv V, effectRaw map[string]any) map
 	inst := map[string]any{
 		"id": raw["id"], "名称": raw["名称"], "系列": raw["系列"], "品质": raw["品质"],
 		"耐受": raw["耐受"], "类型": raw["类型"], "_original": raw,
-		"maxLevel": maxLevel, "buffProps": map[string]any{}, "_effectKeys": []any{},
+		"maxLevel": maxLevel, "buffProps": map[string]any{}, "_attrKeys": []string{},
 	}
 	for _, key := range []string{"极性", "属性", "限定", "效果", "消耗", "技能替换"} {
 		if raw[key] != nil {
@@ -229,6 +327,7 @@ func modApplyLevel(inst, raw map[string]any) {
 				continue
 			}
 			delete(inst, key)
+			modAttrDel(inst, key)
 			if list, ok := mv.([]any); ok && len(list) == 2 {
 				scaled[key] = []any{(Num(list[0]) / float64(maxLevel+1)) * float64(level+1), (Num(list[1]) / float64(maxLevel+1)) * float64(level+1)}
 			} else {
@@ -241,13 +340,15 @@ func modApplyLevel(inst, raw map[string]any) {
 		}
 		inst["生效"] = scaled
 	}
-	for prop, maxValue := range raw {
-		if ModExclude[prop] {
-			continue
-		}
-		if isFalsy(maxValue) {
-			continue
-		}
+	// 词条数值只从加成读取（旧格式顶层直挂数值已折叠进加成表）；键排序保证属性键表确定性。
+	bonus := modBonus(raw)
+	baseKeys := make([]string, 0, len(bonus))
+	for prop := range bonus {
+		baseKeys = append(baseKeys, prop)
+	}
+	sortStrings(baseKeys)
+	for _, prop := range baseKeys {
+		maxValue := bonus[prop]
 		lv := level
 		if ser, ok := inst["系列"].(string); ok && (ser == "换生灵" || ser == "海妖") && prop == "减伤" {
 			lv = maxLevel
@@ -255,23 +356,12 @@ func modApplyLevel(inst, raw map[string]any) {
 		if hasID && ((modID > 100000 && modID < 150000) || (modID > 200000 && modID < 250000)) {
 			lv = maxLevel
 		}
-		if list, ok := maxValue.([]any); ok {
-			idx := lv + 1
-			if idx > len(list) {
-				idx = len(list)
-			}
-			idx--
-			if idx < 0 {
-				idx = 0
-			}
-			inst[prop] = list[idx]
-		} else {
-			value := (Num(maxValue) / float64(maxLevel+1)) * float64(lv+1)
-			if prop == "神智回复" || prop == "最大耐受" {
-				value = math.Ceil(value)
-			}
-			inst[prop] = value
+		value, ok := modBonusValue(prop, maxValue, lv, maxLevel)
+		if !ok {
+			continue
 		}
+		inst[prop] = value
+		modAttrAdd(inst, prop)
 	}
 	buffProps := map[string]any{}
 	if buff, ok := inst["buff"].(map[string]any); ok && buff != nil {
@@ -293,7 +383,7 @@ func modApplyLevel(inst, raw map[string]any) {
 					cur = Num(inst[target])
 				}
 				inst[target] = cur + value
-				inst["_effectKeys"] = append(AsList(inst["_effectKeys"]), target)
+				modAttrAdd(inst, target)
 			}
 		}
 	}
@@ -334,15 +424,10 @@ func resolveEffectProp(inst map[string]any, prop string) string {
 	return prop
 }
 
-// ModProperties 属性键列表（恒返回非 nil，与 Python [] 口径一致）。
+// ModProperties 属性键列表（显式键表，不枚举实例自有键；恒返回非 nil，与 Python [] 口径一致）。
 func ModProperties(inst map[string]any) []string {
 	out := []string{}
-	for k := range inst {
-		if ModExclude[k] || (len(k) > 0 && k[0] == '_') {
-			continue
-		}
-		out = append(out, k)
-	}
+	out = append(out, modAttrKeys(inst)...)
 	return out
 }
 
@@ -1250,10 +1335,12 @@ func ModApplyCondition(mod, attrs map[string]any, charMods []any, condValues map
 			}
 			if !valuesEqual(mod[key], final) {
 				mod[key] = final
+				modAttrAdd(mod, key)
 				changed = true
 			}
 		} else if mod[key] != nil && jsTruthy(mod[key]) {
 			delete(mod, key)
+			modAttrDel(mod, key)
 			changed = true
 		}
 	}
