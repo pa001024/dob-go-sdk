@@ -1033,6 +1033,22 @@ func (e *Engine) WeaponPanels() map[string]any {
 	return panels
 }
 
+// RangedMulti 复刻 CharBuild.getRangedMulti：供技能字段 影响:"多重" 读取。
+// 直接读已算好的远程面板时传该面板，避免重复汇总；缺省时按当前构筑现算（nochar 口径，只取面板）。
+func (e *Engine) RangedMulti(rangedPanel ...map[string]any) float64 {
+	if len(rangedPanel) > 0 && rangedPanel[0] != nil {
+		if v, ok := rangedPanel[0]["多重"]; ok && IsNum(v) {
+			return Num(v)
+		}
+	}
+	if p, ok := e.CalculateWeaponAttributes(instOf(e.S, "rangedWeapon"), true, true)["weapon"].(map[string]any); ok && p != nil {
+		if v, ok := p["多重"]; ok && IsNum(v) {
+			return Num(v)
+		}
+	}
+	return 1
+}
+
 func slot2(s string) string {
 	r := []rune(s)
 	if len(r) > 2 {
@@ -1062,8 +1078,9 @@ func (e *Engine) WeaponsKeys() []string {
 	return keys
 }
 
-// SkillTables 技能表（含别名）。
-func (e *Engine) SkillTables(attrs map[string]any) map[string][]map[string]any {
+// SkillTables 技能表（含别名）。可选的 rangedMulti（远程武器多重，1 开始）
+// 传入时直接用于 影响:"多重" 字段；缺省时由 LevelSkillFieldsWithAttr 按 attrs 回退读取。
+func (e *Engine) SkillTables(attrs map[string]any, rangedMulti ...float64) map[string][]map[string]any {
 	var rules []CondRule
 	for _, r := range e.ConditionalList() {
 		re, err := regexp.Compile(r.Pattern)
@@ -1075,7 +1092,7 @@ func (e *Engine) SkillTables(attrs map[string]any) map[string][]map[string]any {
 	tables := map[string][]map[string]any{}
 	for _, s := range AsList(e.S["allSkills"]) {
 		if skill, ok := s.(map[string]any); ok && skill != nil {
-			tables[S(skill, "safeName")] = LevelSkillFieldsWithAttr(skill, attrs, rules, IsMultAttr)
+			tables[S(skill, "safeName")] = LevelSkillFieldsWithAttr(skill, attrs, rules, IsMultAttr, rangedMulti...)
 		}
 	}
 	if aliases, ok := e.S["skill_aliases"].(map[string]any); ok {
@@ -1417,7 +1434,10 @@ func (e *Engine) DamageContext(attrs map[string]any) *DamageContext {
 	} else {
 		current = e.CalculateWeaponAttributes(nil, false, false)
 	}
-	tables := e.SkillTables(current)
+	// 远程武器多重：技能字段 影响:"多重" 读取该值（先读 nochar 口径面板，与 TS 求值上下文一致，避免 code 面板回填口径差异）
+	basePanels := e.WeaponPanels()
+	rangedMulti := e.RangedMulti(AsMap(basePanels["远程"]))
+	tables := e.SkillTables(current, rangedMulti)
 	e.skillTbl = tables
 	panels := e.ContextPanels(current)
 	eng := e

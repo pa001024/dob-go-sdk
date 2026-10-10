@@ -953,7 +953,9 @@ type CondRule struct {
 }
 
 // LevelSkillFieldsWithAttr 复刻 LeveledSkill.getFieldsWithAttr。
-func LevelSkillFieldsWithAttr(skill map[string]any, attrs map[string]any, rules []CondRule, isMult func(string) bool) []map[string]any {
+// 可选的 rangedMulti（远程武器多重射击，1 开始）显式传入时优先；否则依次读
+// attrs["rangedWeapon"].多重、attrs["weapon"].多重（兼容无 Engine 参与的单机调用），缺省为 1。
+func LevelSkillFieldsWithAttr(skill map[string]any, attrs map[string]any, rules []CondRule, isMult func(string) bool, rangedMulti ...float64) []map[string]any {
 	power := NumD(attrs["技能威力"], 0)
 	if power == 0 {
 		power = 1
@@ -969,6 +971,22 @@ func LevelSkillFieldsWithAttr(skill map[string]any, attrs map[string]any, rules 
 	rng := NumD(attrs["技能范围"], 0)
 	if rng == 0 {
 		rng = 1
+	}
+	multi := 1.0
+	if len(rangedMulti) > 0 {
+		multi = rangedMulti[0]
+	} else if rw, ok := attrs["rangedWeapon"].(map[string]any); ok && rw != nil {
+		if v, ok := rw["多重"]; ok && IsNum(v) {
+			multi = Num(v)
+		} else if w, ok := attrs["weapon"].(map[string]any); ok && w != nil {
+			if v, ok := w["多重"]; ok && IsNum(v) {
+				multi = Num(v)
+			}
+		}
+	} else if w, ok := attrs["weapon"].(map[string]any); ok && w != nil {
+		if v, ok := w["多重"]; ok && IsNum(v) {
+			multi = Num(v)
+		}
 	}
 	var out []map[string]any
 	for _, f := range AsList(skill["字段"]) {
@@ -1021,6 +1039,11 @@ func LevelSkillFieldsWithAttr(skill map[string]any, attrs map[string]any, rules 
 				} else {
 					val = Num(fm["值"]) * (2 - eff)
 				}
+			}
+			if hasStr(props, "多重") {
+				// 多重影响：读取远程武器多重射击属性（1 开始，无远程武器时为 1，即无加成）
+				val = val * multi
+				val2 = val2 * multi
 			}
 			if containsStr(S(fm, "名称"), "神智消耗") {
 				val = math.Ceil(val)
