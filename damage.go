@@ -407,6 +407,18 @@ func (c *DamageContext) GetDef(base, fieldName string, temp map[string]any, ctxS
 	} else {
 		isWeapon = true
 	}
+	// 技能伤害字段（tag 含 技能）视为技能伤害：防御按技能口径结算，吃技能无视防御
+	if fieldName != "" {
+		var table []map[string]any
+		if ctxSafe != "" {
+			table = c.table(ctxSafe)
+		} else {
+			table = c.Tables[key]
+		}
+		if tags, ok := c.FindFieldWide(table, fieldName)["tag"].([]any); ok && hasTag(tags, "技能") {
+			isWeapon = false
+		}
+	}
 	merged := c.Attrs
 	if len(temp) > 0 {
 		merged = c.SummonAttrs(key, temp, fieldName, ctxSafe)
@@ -626,6 +638,8 @@ func (c *DamageContext) SkillDamage(merged map[string]any, base, fieldName, ctxS
 	elemInc := Num(merged["元素增伤"])
 	physInc := Num(merged["物理增伤"])
 	other := 1 + Num(merged["独立增伤"])
+	// 技能追伤乘区（0起始增量）：与武器追加伤害类似的独立乘区，仅技能伤害结算生效
+	other *= 1 + Num(merged["技能追伤"])
 	if isSummon {
 		other *= 1 + Num(merged["召唤物独立增伤"])
 	}
@@ -928,6 +942,11 @@ func (c *DamageContext) GetDamage(base string, fieldName V, temp map[string]any,
 		field = c.FindFieldWide(table, s)
 	}
 	fieldDtype := S(field, "伤害类型")
+	// 技能伤害字段（tag 含 技能，如 10199「求索」）视为技能伤害：增伤池/防御/触发统一按技能口径处理。
+	isSkillDmg := false
+	if tags, ok := field["tag"].([]any); ok && hasTag(tags, "技能") {
+		isSkillDmg = true
+	}
 	w, _ := c.Weapons[key].(map[string]any)
 	arrow := false
 	if w != nil && fieldDtype == "灾厄" && S(w, "类型") == "远程" {
@@ -955,7 +974,20 @@ func (c *DamageContext) GetDamage(base string, fieldName V, temp map[string]any,
 			denom = 0.4
 		}
 		indep := (1 + Num(weaponAttr["独立增伤"])) / denom
+		// 技能伤害字段视为技能伤害：增伤池用技能伤害替代武器伤害（双爆/触发仍走武器面板）
+		if isSkillDmg {
+			merged["武器伤害"] = 0.0
+			merged["增伤"] = Num(merged["增伤"]) + Num(merged["技能伤害"])
+		}
 		wa := CloneMap(weaponAttr)
+		// 技能伤害字段发生时技能触发已是既定事实：触发 bonus 按全额结算，武器触发率不再参与折算；
+		// 视为技能伤害，不吃武器追伤（武器面板追加伤害）。
+		if isSkillDmg {
+			if trig := NumD(wa["触发"], 0); trig < 1 {
+				wa["触发"] = 1.0
+			}
+			wa["追加伤害"] = 0.0
+		}
 		wa["增伤"] = Num(weaponAttr["增伤"]) + bonusInc
 		wa["独立增伤"] = indep*(1+bonusInd) - 1
 		merged["weapon"] = wa
@@ -997,6 +1029,28 @@ func (c *DamageContext) GetDamage(base string, fieldName V, temp map[string]any,
 			}
 		}
 		damage = scaled
+	}
+	// 技能伤害字段（tag 含 技能）：触发概率 = 武器面板触发 + 技能触发后封顶。
+	// 技能触发是固定加值（充盈·巧力 等提供）；封顶后武器触发部分被封顶溢出。
+	if isSkillDmg {
+		coverage := NumD(merged["技能触发"], 0) + NumD(weaponAttr["触发"], 0)
+		if coverage < 0 {
+			coverage = 0
+		}
+		if coverage > 1 {
+			coverage = 1
+		}
+		if coverage != 1 {
+			scaled := map[string]any{}
+			for k, v := range damage {
+				if IsNum(v) {
+					scaled[k] = Num(v) * coverage
+				} else {
+					scaled[k] = v
+				}
+			}
+			damage = scaled
+		}
 	}
 	if len(temp) == 0 {
 		c.dmgCache[cacheKey] = damage

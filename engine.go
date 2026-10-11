@@ -7,11 +7,11 @@ import (
 	"strings"
 )
 
-// CharacterBonus 40 维向量属性名。
+// CharacterBonus 41 维向量属性名。
 var CharacterBonus = []string{
 	"攻击", "固定攻击", "固定生命", "生命", "护盾", "防御", "神智", "属性攻击",
 	"技能威力", "技能耐久", "技能效益", "技能范围", "昂扬", "背水", "增伤",
-	"元素增伤", "物理增伤", "武器伤害", "技能伤害", "技能速度", "属性穿透",
+	"元素增伤", "物理增伤", "武器伤害", "技能伤害", "技能追伤", "技能速度", "属性穿透",
 	"失衡易伤", "技能倍率加数", "召唤物属性继承比例", "召唤物攻击速度", "召唤物范围",
 	"召唤物伤害", "召唤物独立增伤", "技能倍率赋值", "转切割", "转贯穿", "转震荡",
 	"转灾厄", "转充盈", "转属克", "转属逆", "充盈威力", "技能触发", "异常数量", "魔灵CD缩减",
@@ -57,6 +57,8 @@ type Engine struct {
 	modsMul  map[string]float64
 	buffsMul map[string]float64
 	skillTbl map[string][]map[string]any
+	// 条件 code 差分基线是否正在计算中（重入保护标志，见 codeConditionals）
+	scopedComputing bool
 }
 
 // NewEngine 构造。
@@ -380,7 +382,7 @@ func (e *Engine) GetModsBonus(mods []any, attribute, prefix string) float64 {
 
 func hasPrefixStr(s, prefix string) bool { return strings.HasPrefix(s, prefix) }
 
-// BonusVector 40 维向量。
+// BonusVector 41 维向量。
 func (e *Engine) BonusVector() []float64 {
 	out := make([]float64, 0, len(CharacterBonus))
 	for _, a := range CharacterBonus {
@@ -521,6 +523,8 @@ func (e *Engine) CalculateAttributes(nocode, attrApplied bool, depth int) map[st
 	physInc := bonuses[idx["物理增伤"]]
 	weaponDmg := bonuses[idx["武器伤害"]]
 	skillDmg := bonuses[idx["技能伤害"]]
+	// 技能追伤（0 起始）：技能伤害的独立乘区，效果与武器的追加伤害类似
+	skillChase := bonuses[idx["技能追伤"]]
 	skillSpeed := bonuses[idx["技能速度"]]
 	penetration := bonuses[idx["属性穿透"]]
 	imbalanceBonus := bonuses[idx["失衡易伤"]]
@@ -570,6 +574,7 @@ func (e *Engine) CalculateAttributes(nocode, attrApplied bool, depth int) map[st
 		physInc += modAttrBonus * e.GetModsBonus(elm, "物理增伤", "角色")
 		weaponDmg += modAttrBonus * e.GetModsBonus(elm, "武器伤害", "角色")
 		skillDmg += modAttrBonus * e.GetModsBonus(elm, "技能伤害", "角色")
+		skillChase += modAttrBonus * e.GetModsBonus(elm, "技能追伤", "角色")
 		skillSpeed += modAttrBonus * e.GetModsBonus(elm, "技能速度", "角色")
 		penetration += modAttrBonus * e.GetModsBonus(elm, "属性穿透", "角色")
 		imbalanceBonus += modAttrBonus * e.GetModsBonus(elm, "失衡易伤", "角色")
@@ -613,6 +618,7 @@ func (e *Engine) CalculateAttributes(nocode, attrApplied bool, depth int) map[st
 		"技能威力": power, "技能耐久": durability, "技能效益": efficiency, "技能范围": scopeRange,
 		"昂扬": boost, "背水": desperate, "增伤": damageInc, "元素增伤": elemInc,
 		"物理增伤": physInc, "属性攻击": elemBonus, "武器伤害": weaponDmg, "技能伤害": skillDmg,
+		"技能追伤": skillChase,
 		"独立增伤": indInc, "属性穿透": penetration, "无视防御": ignoreDef,
 		"技能无视防御": skillIgnoreDef, "技能速度": skillSpeed, "失衡易伤": imbalanceBonus,
 		"技能倍率加数": skillAdd, "技能倍率乘数": skillMul,
@@ -648,7 +654,9 @@ func (e *Engine) CalculateAttributes(nocode, attrApplied bool, depth int) map[st
 	if nocode {
 		return attrs
 	}
-	if dyn := AsList(e.S["dynamicBuffs"]); len(dyn) > 0 {
+	dyn := AsList(e.S["dynamicBuffs"])
+	effectCodes := e.effectCodeBuffs()
+	if len(dyn)+len(effectCodes) > 0 {
 		allPanels := e.AllWeaponPanels(nil, nil)
 		modAttrs := e.ModAttrSums()
 		for _, b := range dyn {
@@ -658,6 +666,12 @@ func (e *Engine) CalculateAttributes(nocode, attrApplied bool, depth int) map[st
 				}
 				attrs = e.ApplyCodeBuff(buff, attrs, allPanels, modAttrs)
 			}
+		}
+		for _, buff := range effectCodes {
+			if _, ok := buff["技能"].(string); ok {
+				continue
+			}
+			attrs = e.ApplyCodeBuff(buff, attrs, allPanels, modAttrs)
 		}
 	}
 	return attrs
@@ -671,6 +685,47 @@ func pyClamp(v, lo, hi float64) float64 {
 		return hi
 	}
 	return v
+}
+
+// effectCodeBuffs 已装备 MOD/武器特效自带的 code（对齐 TS CharBuild.getEffectCodeBuffs）。
+// 用户勾选 BUFF 的 code 走 dynamicBuffs；特效 code 挂在装备实例上，随装备与特效等级动态变化，
+// 因此每次计算时现取。只收已生效（特效等级 > 0，武器还需熔炼生效）的条目。
+func (e *Engine) effectCodeBuffs() []map[string]any {
+	var out []map[string]any
+	for _, key := range []string{"charMods", "meleeMods", "rangedMods", "skillMods"} {
+		for _, m := range AsList(e.S[key]) {
+			mm, ok := m.(map[string]any)
+			if !ok || mm == nil {
+				continue
+			}
+			buff, _ := mm["buff"].(map[string]any)
+			if buff == nil || S(buff, "code") == "" || NumD(buff["_等级"], 0) <= 0 {
+				continue
+			}
+			out = append(out, buff)
+		}
+	}
+	if aura, ok := e.S["auraMod"].(map[string]any); ok && aura != nil {
+		if buff, _ := aura["buff"].(map[string]any); buff != nil && S(buff, "code") != "" && NumD(buff["_等级"], 0) > 0 {
+			out = append(out, buff)
+		}
+	}
+	for _, key := range []string{"meleeWeapon", "rangedWeapon"} {
+		w, _ := e.S[key].(map[string]any)
+		if w == nil {
+			continue
+		}
+		buff, _ := w["buff"].(map[string]any)
+		if buff == nil || S(buff, "code") == "" || NumD(buff["_等级"], 0) <= 0 {
+			continue
+		}
+		// 缺省视为生效（对齐 TS forgeEffective 默认 true；build 侧只在灾厄未精通时显式置 false）
+		if fe, ok := w["forgeEffective"].(bool); ok && !fe {
+			continue
+		}
+		out = append(out, buff)
+	}
+	return out
 }
 
 // ModAttrSums 各槽位 MOD 属性求和（code 沙箱用）。
@@ -941,7 +996,9 @@ func (e *Engine) CalculateWeaponAttributes(weapon map[string]any, nocode, nochar
 	if nocode {
 		return attrs
 	}
-	if dyn := AsList(e.S["dynamicBuffs"]); len(dyn) > 0 {
+	dyn := AsList(e.S["dynamicBuffs"])
+	effectCodes := e.effectCodeBuffs()
+	if len(dyn)+len(effectCodes) > 0 {
 		allPanels := e.AllWeaponPanels(weapon, AsMap(attrs["weapon"]))
 		modAttrs := e.ModAttrSums()
 		for _, b := range dyn {
@@ -951,6 +1008,12 @@ func (e *Engine) CalculateWeaponAttributes(weapon map[string]any, nocode, nochar
 				}
 				attrs = e.ApplyCodeBuff(buff, attrs, allPanels, modAttrs)
 			}
+		}
+		for _, buff := range effectCodes {
+			if _, ok := buff["技能"].(string); ok {
+				continue
+			}
+			attrs = e.ApplyCodeBuff(buff, attrs, allPanels, modAttrs)
 		}
 	}
 	return attrs
@@ -1162,9 +1225,21 @@ func (e *Engine) codeConditionals() []CondRuleOut {
 			}
 		}
 	}
+	for _, buff := range e.effectCodeBuffs() {
+		if _, ok := buff["技能"].(string); ok {
+			scoped = append(scoped, buff)
+		}
+	}
 	if len(scoped) == 0 {
 		return nil
 	}
+	// 可重入保护：基线计算内部经 attr 型 BUFF 的表达式求值会再次进入本函数，
+	// 此时外层基线尚未算出，直接返回空——基线本就不含条件 code，无需重复差分。
+	if e.scopedComputing {
+		return nil
+	}
+	e.scopedComputing = true
+	defer func() { e.scopedComputing = false }()
 	base := e.CalculateWeaponAttributes(nil, false, false)
 	var out []CondRuleOut
 	for _, buff := range scoped {
