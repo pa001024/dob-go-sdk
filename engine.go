@@ -537,6 +537,7 @@ func (e *Engine) CalculateAttributes(nocode, attrApplied bool, depth int) map[st
 	ignoreDef := e.GetTotal("无视防御", "角色", true)
 	skillIgnoreDef := e.GetTotal("技能无视防御", "角色", true)
 	indInc := e.GetTotalMul("独立增伤", "角色", true)
+	skillIndInc := e.GetTotalMul("技能独立增伤", "角色", true)
 	damageReduce := e.GetTotalReduce("减伤", "")
 	skillSet := bonuses[idx["技能倍率赋值"]]
 	skillMul := e.GetTotalMul("技能倍率乘数", "角色", true)
@@ -619,7 +620,7 @@ func (e *Engine) CalculateAttributes(nocode, attrApplied bool, depth int) map[st
 		"昂扬": boost, "背水": desperate, "增伤": damageInc, "元素增伤": elemInc,
 		"物理增伤": physInc, "属性攻击": elemBonus, "武器伤害": weaponDmg, "技能伤害": skillDmg,
 		"技能追伤": skillChase,
-		"独立增伤": indInc, "属性穿透": penetration, "无视防御": ignoreDef,
+		"独立增伤": indInc, "技能独立增伤": skillIndInc, "属性穿透": penetration, "无视防御": ignoreDef,
 		"技能无视防御": skillIgnoreDef, "技能速度": skillSpeed, "失衡易伤": imbalanceBonus,
 		"技能倍率加数": skillAdd, "技能倍率乘数": skillMul,
 		"召唤物属性继承比例": inheritRatio, "召唤物攻击速度": summonAs,

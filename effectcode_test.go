@@ -86,24 +86,25 @@ func qiusuoCtx(skillTrigger, weaponTrigger float64) *DamageContext {
 		map[string][]map[string]any{"求索": {field}},
 		nil, nil, nil, map[string]any{},
 		map[string]any{"求索": weapon}, map[string]any{},
-		map[string]any{"enemyResistance": 0.5}, "普通攻击", nil,
+		map[string]any{"resistance": 0.5}, "普通攻击", nil,
 	)
 }
 
 func TestQiusuoSkillTriggerCoverage(t *testing.T) {
-	// 触发概率 = 武器面板触发(0.2) + 技能触发后封顶：0.74/0.29
+	// 触发期望按 bonus 模型：(1 + 0.74) / (1 + 0.29)（灾厄 bonus = 1，抗性存在）
 	hi := qiusuoCtx(0.54, 0.2).GetDamage("求索", "[求索]伤害", map[string]any{}, "")
 	lo := qiusuoCtx(0.09, 0.2).GetDamage("求索", "[求索]伤害", map[string]any{}, "")
 	if lo["expectedDamage"] == nil || Num(lo["expectedDamage"]) == 0 {
 		t.Fatalf("低触发期望为 0，无法验证比例")
 	}
-	if got := Num(hi["expectedDamage"]) / Num(lo["expectedDamage"]); got < 2.551 || got > 2.553 {
-		t.Errorf("求索伤害触发比例=%v want=0.74/0.29", got)
+	if got := Num(hi["expectedDamage"]) / Num(lo["expectedDamage"]); got < 1.348 || got > 1.350 {
+		t.Errorf("求索伤害触发比例=%v want=1.74/1.29", got)
 	}
 	floor := qiusuoCtx(0, 0.2).GetDamage("求索", "[求索]伤害", map[string]any{}, "")
 	capped := qiusuoCtx(1, 0.2).GetDamage("求索", "[求索]伤害", map[string]any{}, "")
-	if got := Num(floor["expectedDamage"]) / Num(capped["expectedDamage"]); got < 0.19999 || got > 0.20001 {
-		t.Errorf("无技能触发时应按武器面板触发结算，比例=%v want=0.2", got)
+	// bonus 模型：无技能触发时按 (1 + 武器面板触发) 结算，封顶对照为全额 2 倍
+	if got := Num(floor["expectedDamage"]) / Num(capped["expectedDamage"]); got < 0.59999 || got > 0.60001 {
+		t.Errorf("无技能触发时应按(1+武器面板触发)结算，比例=%v want=0.6", got)
 	}
 }
 
@@ -114,11 +115,11 @@ func TestQiusuoWeaponTriggerIgnored(t *testing.T) {
 	if got := Num(b["expectedDamage"]) / Num(a["expectedDamage"]); got < 0.999999 || got > 1.000001 {
 		t.Errorf("封顶后武器触发应不影响求索伤害，比例=%v want=1", got)
 	}
-	// 未封顶时武器触发提高求索伤害（加法模型）
+	// 未封顶时武器触发提高求索伤害（加法模型，bonus 期望比）
 	c := qiusuoCtx(0, 0.2).GetDamage("求索", "[求索]伤害", map[string]any{}, "")
 	d := qiusuoCtx(0, 0.5).GetDamage("求索", "[求索]伤害", map[string]any{}, "")
-	if got := Num(d["expectedDamage"]) / Num(c["expectedDamage"]); got < 2.49999 || got > 2.50001 {
-		t.Errorf("未封顶时武器触发应等比提高求索伤害，比例=%v want=2.5", got)
+	if got := Num(d["expectedDamage"]) / Num(c["expectedDamage"]); got < 1.24999 || got > 1.25001 {
+		t.Errorf("未封顶时武器触发应等比提高求索伤害，比例=%v want=1.25", got)
 	}
 }
 
@@ -143,5 +144,22 @@ func TestQiusuoDamagePools(t *testing.T) {
 	withChase.Panels["求索"].(map[string]any)["追加伤害"] = 1.0
 	if got := Num(withChase.GetDamage("求索", "[求索]伤害", map[string]any{}, "")["expectedDamage"]) / baseDmg; got < 0.999999 || got > 1.000001 {
 		t.Errorf("武器追伤应不影响求索伤害，比例=%v want=1", got)
+	}
+}
+
+func TestCalamityConvertNoWeaponTrigger(t *testing.T) {
+	// 无武器归属的转灾厄依然结算灾厄触发（只需敌方存在抗性），按技能触发率。
+	merged := func(st float64) map[string]any {
+		return map[string]any{
+			"增伤": 0.0, "技能伤害": 0.0, "元素增伤": 0.0, "物理增伤": 0.0,
+			"独立增伤": 0.0, "技能追伤": 0.0, "属性穿透": 0.0, "失衡易伤": 0.0,
+			"昂扬": 0.0, "背水": 0.0, "技能触发": st, "转灾厄": 1.0,
+		}
+	}
+	ctx := &DamageContext{Combat: map[string]any{"resistance": -4.0}}
+	full := ctx.Damage(merged(1.0), nil, nil, DamageOptions{IsSkillPool: boolPtr(true), Coverage: 1.0})
+	none := ctx.Damage(merged(0.0), nil, nil, DamageOptions{IsSkillPool: boolPtr(true), Coverage: 1.0})
+	if got := Num(full["expectedDamage"]) / Num(none["expectedDamage"]); got < 1.99999 || got > 2.00001 {
+		t.Errorf("转灾厄无武器时应按技能触发率结算灾厄触发，比例=%v want=2", got)
 	}
 }

@@ -602,52 +602,90 @@ func (c *DamageContext) triggerMult(dtype string) float64 {
 	return 0
 }
 
-// SkillDamage 对齐 calculateSkillDamage。
-func (c *DamageContext) SkillDamage(merged map[string]any, base, fieldName, ctxSafe string) map[string]any {
-	tableSafe := ctxSafe
-	if tableSafe == "" {
-		key := base
-		if key == "" {
-			key = c.BaseName
+// DamageOptions 对齐 TS DamageCalcOptions：归属定双爆，tag 定乘区分量。
+type DamageOptions struct {
+	DamageType  string
+	FieldTag    []string
+	IsSkillPool *bool
+	IsSummon    *bool
+	Coverage    float64
+	BonusInc    float64
+	BonusInd    float64
+	Penalty     float64
+}
+
+func boolPtr(b bool) *bool {
+	v := b
+	return &v
+}
+
+// Damage 统一伤害结算，对齐 TS calculateDamage。
+//   - 双爆（暴击/触发期望）按伤害来源（字段归属）结算：有武器面板走武器双爆，无武器（角色技能）不结算双爆
+//     （转灾厄转换分量除外：灾厄触发只需敌方存在抗性，无武器归属时按技能触发率结算）；
+//   - 乘区与分量按字段 tag 结算：tag 含「技能」用技能伤害池 + 技能追伤 + 纯元素分量
+//     （武器归属的灾厄伤害转纯物理分量），tag 含「武器」用武器伤害池 + 武器追加伤害 + 武器攻分量；
+//     无 tag 按归属回退；
+//   - 技能池触发按 bonus 模型结算：期望 = base × (1 + bonus × 覆盖率），覆盖率 = min(1, 技能触发 + 武器触发）。
+//
+// 调用方按实际语义传参，禁止在外层重写触发与增伤区。
+func (c *DamageContext) Damage(merged map[string]any, weapon map[string]any, panel map[string]any, opts DamageOptions) map[string]any {
+	hasWeapon := weapon != nil && panel != nil
+	if panel == nil {
+		panel = map[string]any{}
+	}
+	isSkillPool := !hasWeapon
+	if opts.IsSkillPool != nil {
+		isSkillPool = *opts.IsSkillPool
+	} else if hasStr(opts.FieldTag, "技能") {
+		isSkillPool = true
+	} else if hasStr(opts.FieldTag, "武器") {
+		isSkillPool = false
+	}
+	isSummon := hasStr(opts.FieldTag, "召唤物")
+	if opts.IsSummon != nil {
+		isSummon = *opts.IsSummon
+	}
+	dtype := opts.DamageType
+	if dtype == "" {
+		dtype = S(weapon, "伤害类型")
+	}
+	coverage := opts.Coverage
+	hpMore := c.boost(merged) * c.desperate(merged)
+	pen := math.Max(0, 1+Num(merged["属性穿透"]))
+	var diBase float64
+	if isSkillPool {
+		diBase = 1 + Num(merged["增伤"]) + Num(merged["技能伤害"])
+		if isSummon {
+			diBase += Num(merged["召唤物伤害"])
 		}
-		for _, e := range c.SkillNames {
-			if S(e, "名称") == key {
-				tableSafe = S(e, "safeName")
-				break
-			}
-		}
+	} else {
+		diBase = 1 + Num(merged["增伤"]) + Num(panel["增伤"]) + Num(merged["武器伤害"])
 	}
-	var field map[string]any
-	if fieldName != "" {
-		field = c.FindFieldWide(c.table(tableSafe), fieldName)
-	}
-	isSummon := false
-	if field != nil {
-		if tags, ok := field["tag"].([]any); ok {
-			for _, t := range tags {
-				if s, ok := t.(string); ok && s == "召唤物" {
-					isSummon = true
-				}
-			}
-		}
-	}
-	diBase := 1 + Num(merged["增伤"]) + Num(merged["技能伤害"])
-	if isSummon {
-		diBase += Num(merged["召唤物伤害"])
-	}
+	diBase += opts.BonusInc
 	elemInc := Num(merged["元素增伤"])
 	physInc := Num(merged["物理增伤"])
-	other := 1 + Num(merged["独立增伤"])
-	// 技能追伤乘区（0起始增量）：与武器追加伤害类似的独立乘区，仅技能伤害结算生效
-	other *= 1 + Num(merged["技能追伤"])
-	if isSummon {
-		other *= 1 + Num(merged["召唤物独立增伤"])
+	var indep float64
+	if isSkillPool {
+		indep = (1 + Num(merged["独立增伤"])) * (1 + Num(merged["技能独立增伤"]))
+	} else {
+		indep = ((1 + Num(merged["独立增伤"])) * (1 + Num(panel["独立增伤"]))) / (1 + opts.Penalty)
 	}
+	indep *= 1 + opts.BonusInd
+	var add float64
+	if isSkillPool {
+		add = 1 + Num(merged["技能追伤"])
+	} else {
+		add = 1 + Num(panel["追加伤害"])
+	}
+	summonMult := 1.0
+	if isSummon {
+		summonMult = 1 + Num(merged["召唤物独立增伤"])
+	}
+	other := indep * add * summonMult * pen
 	if b, ok := c.Combat["imbalance"].(bool); ok && b {
 		other *= Num(merged["失衡易伤"]) + 1.5
 	}
-	other *= math.Max(0, 1+Num(merged["属性穿透"]))
-	hpMore := c.boost(merged) * c.desperate(merged)
+	common := hpMore * other
 	resistance := Num(c.Combat["resistance"])
 	factor := func(r float64) float64 { return math.Max(0, 1-r) }
 	flipped := math.Max(0, 1-func() float64 {
@@ -676,197 +714,135 @@ func (c *DamageContext) SkillDamage(merged map[string]any, base, fieldName, ctxS
 		scale = 1 / pool
 	}
 	rest := math.Max(0, 1-math.Min(1, pool))
-	type part struct {
-		r  float64
-		f  float64
-		el bool
-	}
-	var parts []part
-	if rest > 0 {
-		parts = append(parts, part{rest, factor(resistance), true})
-	}
-	if active != "" {
-		ratio := math.Max(0, Num(merged[active])) * scale
-		if ratio > 0 {
-			parts = append(parts, part{ratio, flipped, true})
-		}
-	}
-	for _, k := range PhysicalConverts {
-		ratio := math.Max(0, Num(merged[k])) * scale
-		if ratio > 0 {
-			parts = append(parts, part{ratio, 1, false})
-		}
-	}
-	phys, elem := 0.0, 0.0
-	for _, p := range parts {
-		inc := diBase + elemInc
-		if !p.el {
-			inc = diBase + physInc
-		}
-		if p.el {
-			elem += p.r * p.f * inc
+	var critRate, critDmg float64
+	critDmg = 1.0
+	lowerCd, higherCd, critExp := 1.0, 1.0, 1.0
+	triggerRate := 0.0
+	if hasWeapon {
+		critRate = Num(panel["暴击"])
+		critDmg = Num(panel["暴伤"])
+		lowerCd = (critDmg-1)*math.Floor(critRate) + 1
+		higherCd = (critDmg-1)*math.Ceil(critRate) + 1
+		critExp = 1 + critRate*(critDmg-1)
+		// 技能池的触发率即调用方传入的覆盖率（武器面板触发 + 技能触发后封顶），按 bonus 模型进入期望
+		if isSkillPool {
+			triggerRate = coverage
 		} else {
-			phys += p.r * p.f * inc
+			triggerRate = math.Min(1, math.Max(0, Num(panel["触发"])))
 		}
-	}
-	total := phys + elem
-	return map[string]any{
-		"expectedDamage": total * other * hpMore,
-		"noHpDamage":     total * other,
-		"physicalDamage": phys * other * hpMore,
-		"elementDamage":  elem * other * hpMore,
-	}
-}
-
-func (c *DamageContext) convTrigger(key string) float64 {
-	m := map[string]string{"转切割": "切割", "转贯穿": "贯穿", "转震荡": "震荡", "转灾厄": "灾厄"}
-	if v, ok := m[key]; ok {
-		return c.triggerMult(v)
-	}
-	return c.triggerMult(key)
-}
-
-// WeaponDamage 对齐 calculateWeaponDamage。
-func (c *DamageContext) WeaponDamage(merged map[string]any, key, fieldDamageType string) map[string]any {
-	w, _ := c.Weapons[key].(map[string]any)
-	if w == nil {
-		w = map[string]any{}
-	}
-	weaponAttrs, _ := merged["weapon"].(map[string]any)
-	if weaponAttrs == nil {
-		weaponAttrs = map[string]any{}
-	}
-	total := Num(merged["攻击"]) + Num(weaponAttrs["攻击"])
-	inheritAll := S(w, "atk") == "all" && isTrue(w["inherit"]) && isTrue(w["isSkillWeapon"])
-	dtype := fieldDamageType
-	if dtype == "" {
-		dtype = S(w, "伤害类型")
-	}
-	convertPhys := dtype == "灾厄" && !inheritAll
-	var physShare, elemShare float64
-	if convertPhys {
-		physShare, elemShare = 1, 0
-	} else if inheritAll {
-		physShare, elemShare = 0, 1
 	} else {
-		if total != 0 {
-			physShare = Num(weaponAttrs["攻击"]) / total
-			elemShare = Num(merged["攻击"]) / total
-		}
+		// 无武器归属：仅转灾厄转换分量结算触发（灾厄触发只需敌方存在抗性），按技能触发率；
+		// 其余分量的 triggerAdd 均为 0，该值不影响它们
+		triggerRate = math.Min(1, math.Max(0, Num(merged["技能触发"])))
 	}
-	tr := Num(weaponAttrs["触发"])
-	if tr < 0 {
-		tr = 0
-	}
-	if tr > 1 {
-		tr = 1
-	}
-	triggerRate := tr
-	critRate := Num(weaponAttrs["暴击"])
-	critDmg := Num(weaponAttrs["暴伤"])
-	lowerCd := (critDmg-1)*math.Floor(critRate) + 1
-	higherCd := (critDmg-1)*math.Ceil(critRate) + 1
-	critExp := 1 + critRate*(critDmg-1)
-	resistance := Num(c.Combat["resistance"])
-	flipped := math.Max(0, 1-func() float64 {
-		if resistance > 0 {
-			return -4
-		}
-		return 0.5
-	}())
-	pen := math.Max(0, 1+Num(merged["属性穿透"]))
-	hpMore := c.boost(merged) * c.desperate(merged)
-	diBase := 1 + Num(merged["增伤"]) + Num(weaponAttrs["增伤"]) + Num(merged["武器伤害"])
-	elemInc := Num(merged["元素增伤"])
-	physInc := Num(merged["物理增伤"])
-	other := (1 + Num(merged["独立增伤"])) * (1 + Num(weaponAttrs["独立增伤"]))
-	other *= 1 + Num(weaponAttrs["追加伤害"])
-	if b, ok := c.Combat["imbalance"].(bool); ok && b {
-		other *= Num(merged["失衡易伤"]) + 1.5
-	}
-	other *= pen
-	common := hpMore * other
-	var active string
-	if resistance > 0 {
-		active = "转属克"
-	} else if resistance < 0 {
-		active = "转属逆"
-	}
-	rawElem := 0.0
-	if active != "" {
-		rawElem = math.Max(0, Num(merged[active]))
-	}
-	rawPhys := 0.0
-	for _, k := range PhysicalConverts {
-		rawPhys += math.Max(0, Num(merged[k]))
-	}
-	pool := rawElem + rawPhys
-	scale := 1.0
-	if pool > 1 {
-		scale = 1 / pool
-	}
-	rest := math.Max(0, 1-math.Min(1, pool))
-	elemRatio := math.Min(1, rawElem) * scale
-	f := func(r float64) float64 { return math.Max(0, 1-r) }
-	var resFactor float64
-	if resistance == 0 {
-		resFactor = f(0)
-	} else if resistance < 0 {
-		resFactor = (1-elemRatio)*f(resistance) + elemRatio*f(0.5)
-	} else {
-		resFactor = (1-elemRatio)*f(resistance) + elemRatio*f(-4)
-	}
-	type entry struct {
-		ratio float64
-		kind  string
-		key   string
-	}
-	var entries []entry
-	if active != "" {
-		entries = append(entries, entry{rawElem, "element", active})
-	}
-	for _, k := range PhysicalConverts {
-		entries = append(entries, entry{math.Max(0, Num(merged[k])), "physical", k})
-	}
-	elemPart := elemShare * resFactor
+	inheritAll := S(weapon, "atk") == "all" && isTrue(weapon["inherit"]) && isTrue(weapon["isSkillWeapon"])
+	calamity := hasWeapon && dtype == "灾厄" && !inheritAll
+	useWeaponSplit := !isSkillPool && hasWeapon
 	type dpart struct {
 		r  float64
+		f  float64
 		t  float64
 		el bool
 	}
 	var parts []dpart
-	if inheritAll {
-		if rest > 0 {
-			parts = append(parts, dpart{elemPart * rest, 0, true})
+	if useWeaponSplit {
+		total := Num(merged["攻击"]) + Num(panel["攻击"])
+		convertPhys := dtype == "灾厄" && !inheritAll
+		var physShare, elemShare float64
+		if convertPhys {
+			physShare, elemShare = 1, 0
+		} else if inheritAll {
+			physShare, elemShare = 0, 1
+		} else if total != 0 {
+			physShare = Num(panel["攻击"]) / total
+			elemShare = Num(merged["攻击"]) / total
 		}
-	} else {
-		if physShare > 0 && rest > 0 {
-			parts = append(parts, dpart{physShare * rest, c.triggerMult(dtype), false})
-		}
-		if rest > 0 {
-			parts = append(parts, dpart{elemPart * rest, 0, true})
-		}
-	}
-	for _, e := range entries {
-		e.ratio *= scale
-		if e.ratio <= 0 {
-			continue
-		}
-		if e.kind == "element" {
-			if physShare > 0 {
-				parts = append(parts, dpart{physShare * e.ratio * flipped, 0, true})
-			}
-			parts = append(parts, dpart{elemPart * e.ratio, 0, true})
+		elemRatio := math.Min(1, rawElem) * scale
+		var resFactor float64
+		if resistance == 0 {
+			resFactor = factor(0)
+		} else if resistance < 0 {
+			resFactor = (1-elemRatio)*factor(resistance) + elemRatio*factor(0.5)
 		} else {
-			trig := c.convTrigger(e.key)
+			resFactor = (1-elemRatio)*factor(resistance) + elemRatio*factor(-4)
+		}
+		elemPart := elemShare * resFactor
+		if inheritAll {
+			if rest > 0 {
+				parts = append(parts, dpart{elemPart * rest, 1, 0, true})
+			}
+		} else {
+			if physShare > 0 && rest > 0 {
+				parts = append(parts, dpart{physShare * rest, 1, c.triggerMult(dtype), false})
+			}
+			if rest > 0 {
+				parts = append(parts, dpart{elemPart * rest, 1, 0, true})
+			}
+		}
+		if active != "" {
+			ratio := rawElem * scale
+			if ratio > 0 {
+				if !inheritAll && physShare > 0 {
+					parts = append(parts, dpart{physShare * ratio * flipped, 1, 0, true})
+				}
+				parts = append(parts, dpart{elemPart * ratio, 1, 0, true})
+			}
+		}
+		for _, k := range PhysicalConverts {
+			ratio := math.Max(0, Num(merged[k])) * scale
+			if ratio <= 0 {
+				continue
+			}
+			trig := c.convTrigger(k)
 			if inheritAll {
-				parts = append(parts, dpart{elemPart * e.ratio, trig, false})
+				parts = append(parts, dpart{elemPart * ratio, 1, trig, false})
 			} else {
 				if physShare > 0 {
-					parts = append(parts, dpart{physShare * e.ratio, trig, false})
+					parts = append(parts, dpart{physShare * ratio, 1, trig, false})
 				}
-				parts = append(parts, dpart{elemPart * e.ratio, trig, false})
+				parts = append(parts, dpart{elemPart * ratio, 1, trig, false})
 			}
+		}
+	} else {
+		skillTrig := 0.0
+		if hasWeapon {
+			skillTrig = c.triggerMult(dtype)
+		}
+		if calamity {
+			// 灾厄转化：纯物理基座，不吃抗性；转属克/转属逆部分按翻转抗性计入元素
+			if rest > 0 {
+				parts = append(parts, dpart{rest, 1, skillTrig, false})
+			}
+			if active != "" {
+				ratio := rawElem * scale
+				if ratio > 0 {
+					parts = append(parts, dpart{ratio, flipped, 0, true})
+				}
+			}
+		} else {
+			if rest > 0 {
+				parts = append(parts, dpart{rest, factor(resistance), skillTrig, true})
+			}
+			if active != "" {
+				ratio := math.Max(0, Num(merged[active])) * scale
+				if ratio > 0 {
+					parts = append(parts, dpart{ratio, flipped, skillTrig, true})
+				}
+			}
+		}
+		for _, k := range PhysicalConverts {
+			ratio := math.Max(0, Num(merged[k])) * scale
+			if ratio <= 0 {
+				continue
+			}
+			// 转灾厄无武器归属时也结算灾厄触发（只需敌方存在抗性）；其余物理子类仍需武器归属
+			trig := 0.0
+			if hasWeapon {
+				trig = c.convTrigger(k)
+			} else if k == "转灾厄" {
+				trig = c.triggerMult("灾厄")
+			}
+			parts = append(parts, dpart{ratio, 1, trig, false})
 		}
 	}
 	inc := func(el bool) float64 {
@@ -878,16 +854,17 @@ func (c *DamageContext) WeaponDamage(merged map[string]any, key, fieldDamageType
 	allPart, trigPart, expPart := 0.0, 0.0, 0.0
 	physExp, elemExp := 0.0, 0.0
 	for _, p := range parts {
-		allPart += p.r * inc(p.el)
-		trigPart += p.r * (1 + p.t) * inc(p.el)
-		expPart += p.r * (1 + p.t*triggerRate) * inc(p.el)
+		allPart += p.r * p.f * inc(p.el)
+		trigPart += p.r * p.f * (1 + p.t) * inc(p.el)
+		expPart += p.r * p.f * (1 + p.t*triggerRate) * inc(p.el)
 		if p.el {
-			elemExp += p.r * (1 + p.t*triggerRate) * inc(p.el)
+			elemExp += p.r * p.f * (1 + p.t*triggerRate) * inc(p.el)
 		} else {
-			physExp += p.r * (1 + p.t*triggerRate) * inc(p.el)
+			physExp += p.r * p.f * (1 + p.t*triggerRate) * inc(p.el)
 		}
 	}
 	expCritBase := critExp * common
+	// 技能池的覆盖率已作为触发率进入期望（bonus 模型），此处不再整体折乘
 	return map[string]any{
 		"lowerCritNoTrigger":        allPart * (lowerCd * common),
 		"higherCritNoTrigger":       allPart * (higherCd * common),
@@ -902,6 +879,59 @@ func (c *DamageContext) WeaponDamage(merged map[string]any, key, fieldDamageType
 		"physicalDamage":            physExp * expCritBase,
 		"elementDamage":             elemExp * expCritBase,
 	}
+}
+
+// SkillDamage 对齐 calculateSkillDamage。
+// SkillDamage 对齐 calculateSkillDamage（角色技能口径）：无武器归属，乘区分量按 tag 回退技能池。
+func (c *DamageContext) SkillDamage(merged map[string]any, base, fieldName, ctxSafe string) map[string]any {
+	tableSafe := ctxSafe
+	if tableSafe == "" {
+		key := base
+		if key == "" {
+			key = c.BaseName
+		}
+		for _, e := range c.SkillNames {
+			if S(e, "名称") == key {
+				tableSafe = S(e, "safeName")
+				break
+			}
+		}
+	}
+	var field map[string]any
+	if fieldName != "" {
+		field = c.FindFieldWide(c.table(tableSafe), fieldName)
+	}
+	var tag []string
+	isSummon := false
+	if field != nil {
+		if tags, ok := field["tag"].([]any); ok {
+			for _, t := range tags {
+				if s, ok := t.(string); ok {
+					tag = append(tag, s)
+					if s == "召唤物" {
+						isSummon = true
+					}
+				}
+			}
+		}
+	}
+	return c.Damage(merged, nil, nil, DamageOptions{FieldTag: tag, IsSummon: boolPtr(isSummon), Coverage: 1.0})
+}
+
+func (c *DamageContext) convTrigger(key string) float64 {
+	m := map[string]string{"转切割": "切割", "转贯穿": "贯穿", "转震荡": "震荡", "转灾厄": "灾厄"}
+	if v, ok := m[key]; ok {
+		return c.triggerMult(v)
+	}
+	return c.triggerMult(key)
+}
+
+// WeaponDamage 对齐 calculateWeaponDamage。
+// WeaponDamage 对齐 calculateWeaponDamage（武器口径）：武器归属双爆，武器池乘区分量。
+func (c *DamageContext) WeaponDamage(merged map[string]any, key, fieldDamageType string) map[string]any {
+	w, _ := c.Weapons[key].(map[string]any)
+	panel, _ := merged["weapon"].(map[string]any)
+	return c.Damage(merged, w, panel, DamageOptions{DamageType: fieldDamageType, IsSkillPool: boolPtr(false), IsSummon: boolPtr(false), Coverage: 1.0})
 }
 
 func isTrue(v V) bool {
@@ -942,11 +972,21 @@ func (c *DamageContext) GetDamage(base string, fieldName V, temp map[string]any,
 		field = c.FindFieldWide(table, s)
 	}
 	fieldDtype := S(field, "伤害类型")
-	// 技能伤害字段（tag 含 技能，如 10199「求索」）视为技能伤害：增伤池/防御/触发统一按技能口径处理。
-	isSkillDmg := false
-	if tags, ok := field["tag"].([]any); ok && hasTag(tags, "技能") {
-		isSkillDmg = true
+	tag := []string{}
+	if field != nil {
+		if tags, ok := field["tag"].([]any); ok {
+			for _, t := range tags {
+				if s, ok := t.(string); ok {
+					tag = append(tag, s)
+				}
+			}
+		}
 	}
+	// 乘区与分量按字段 tag 结算：tag 含「技能」走技能池（技能伤害 + 技能追伤 + 纯元素分量），
+	// 含「武器」走武器池；无 tag 按归属回退（有武器面板→武器池，否则→技能池）。
+	// 双爆（暴击/触发）按归属结算。调用方按语义传参，不再重写面板触发区与属性增伤区：
+	// 原写法把武器增伤/武器独立增伤乘进技能池、把武器追加伤害清零（丢了技能追伤）、
+	// 把武器攻分量套在技能分量上，导致计算错误。
 	w, _ := c.Weapons[key].(map[string]any)
 	arrow := false
 	if w != nil && fieldDtype == "灾厄" && S(w, "类型") == "远程" {
@@ -955,60 +995,41 @@ func (c *DamageContext) GetDamage(base string, fieldName V, temp map[string]any,
 		}
 	}
 	weaponAttr := c.TempWeaponAttr(key, strOrEmpty(fieldName), temp, ctxSafe)
-	var damage map[string]any
-	if w != nil && weaponAttr != nil {
-		var tags []any
-		if field != nil {
-			tags, _ = field["tag"].([]any)
-		}
-		var bonusInc, bonusInd float64
-		if c.BonusFn != nil {
-			bonusInc = c.BonusFn(key, fieldName, "增伤", S(w, "类型"), tags, ctxSafe)
-			bonusInd = c.BonusFn(key, fieldName, "独立增伤", S(w, "类型"), tags, ctxSafe)
-		} else {
-			bonusInc = Num(c.AttackBonus[KeyOf(key, fieldName, "增伤")])
-			bonusInd = Num(c.AttackBonus[KeyOf(key, fieldName, "独立增伤")])
-		}
-		denom := 1.0
-		if arrow {
-			denom = 0.4
-		}
-		indep := (1 + Num(weaponAttr["独立增伤"])) / denom
-		// 技能伤害字段视为技能伤害：增伤池用技能伤害替代武器伤害（双爆/触发仍走武器面板）
-		if isSkillDmg {
-			merged["武器伤害"] = 0.0
-			merged["增伤"] = Num(merged["增伤"]) + Num(merged["技能伤害"])
-		}
-		wa := CloneMap(weaponAttr)
-		// 技能伤害字段发生时技能触发已是既定事实：触发 bonus 按全额结算，武器触发率不再参与折算；
-		// 视为技能伤害，不吃武器追伤（武器面板追加伤害）。
-		if isSkillDmg {
-			if trig := NumD(wa["触发"], 0); trig < 1 {
-				wa["触发"] = 1.0
-			}
-			wa["追加伤害"] = 0.0
-		}
-		wa["增伤"] = Num(weaponAttr["增伤"]) + bonusInc
-		wa["独立增伤"] = indep*(1+bonusInd) - 1
-		merged["weapon"] = wa
-		damage = c.WeaponDamage(merged, key, fieldDtype)
-	} else {
-		var bonusInc, bonusInd float64
-		if c.BonusFn != nil {
-			var wtype string
-			if ww, ok := c.Weapons[key].(map[string]any); ok && ww != nil {
-				wtype = S(ww, "类型")
-			}
-			bonusInc = c.BonusFn(key, fieldName, "增伤", wtype, nil, ctxSafe)
-			bonusInd = c.BonusFn(key, fieldName, "独立增伤", wtype, nil, ctxSafe)
-		} else {
-			bonusInc = Num(c.AttackBonus[KeyOf(key, fieldName, "增伤")])
-			bonusInd = Num(c.AttackBonus[KeyOf(key, fieldName, "独立增伤")])
-		}
-		merged["增伤"] = Num(merged["增伤"]) + bonusInc
-		merged["独立增伤"] = (1+Num(merged["独立增伤"]))*(1+bonusInd) - 1
-		damage = c.SkillDamage(merged, base, strOrEmpty(fieldName), ctxSafe)
+	hasWeapon := w != nil && weaponAttr != nil
+	isSkillPool := !hasWeapon
+	if hasStr(tag, "技能") {
+		isSkillPool = true
+	} else if hasStr(tag, "武器") {
+		isSkillPool = false
 	}
+	isSummon := hasStr(tag, "召唤物")
+	var bonusInc, bonusInd float64
+	var rawTags []any
+	if field != nil {
+		rawTags, _ = field["tag"].([]any)
+	}
+	if c.BonusFn != nil {
+		// BonusFn 在 tags 为空时自行回退到字段 tag 定位（见 engine.go），两侧路由传参一致
+		bonusInc = c.BonusFn(key, fieldName, "增伤", S(w, "类型"), rawTags, ctxSafe)
+		bonusInd = c.BonusFn(key, fieldName, "独立增伤", S(w, "类型"), rawTags, ctxSafe)
+	} else {
+		bonusInc = Num(c.AttackBonus[KeyOf(key, fieldName, "增伤")])
+		bonusInd = Num(c.AttackBonus[KeyOf(key, fieldName, "独立增伤")])
+	}
+	// 技能池 + 有武器面板：触发期望按覆盖率结算（bonus 模型：未触发 1 倍），
+	// 覆盖率 = 武器面板触发 + 技能触发后封顶（技能触发是固定加值）。
+	coverage := 1.0
+	if isSkillPool && hasWeapon {
+		coverage = math.Max(0, math.Min(1, NumD(merged["技能触发"], 0)+NumD(weaponAttr["触发"], 0)))
+	}
+	penalty := 0.0
+	if arrow {
+		penalty = -0.6
+	}
+	damage := c.Damage(merged, w, weaponAttr, DamageOptions{
+		DamageType: fieldDtype, FieldTag: tag, IsSkillPool: boolPtr(isSkillPool), IsSummon: boolPtr(isSummon),
+		Coverage: coverage, BonusInc: bonusInc, BonusInd: bonusInd, Penalty: penalty,
+	})
 	fullnessMult := 1.0
 	if field != nil {
 		if tags, ok := field["tag"].([]any); ok && hasTag(tags, "充盈") {
@@ -1030,28 +1051,7 @@ func (c *DamageContext) GetDamage(base string, fieldName V, temp map[string]any,
 		}
 		damage = scaled
 	}
-	// 技能伤害字段（tag 含 技能）：触发概率 = 武器面板触发 + 技能触发后封顶。
-	// 技能触发是固定加值（充盈·巧力 等提供）；封顶后武器触发部分被封顶溢出。
-	if isSkillDmg {
-		coverage := NumD(merged["技能触发"], 0) + NumD(weaponAttr["触发"], 0)
-		if coverage < 0 {
-			coverage = 0
-		}
-		if coverage > 1 {
-			coverage = 1
-		}
-		if coverage != 1 {
-			scaled := map[string]any{}
-			for k, v := range damage {
-				if IsNum(v) {
-					scaled[k] = Num(v) * coverage
-				} else {
-					scaled[k] = v
-				}
-			}
-			damage = scaled
-		}
-	}
+	// 技能池的覆盖率已作为触发率进入期望（bonus 模型），此处不再整体折算
 	if len(temp) == 0 {
 		c.dmgCache[cacheKey] = damage
 	}
