@@ -621,7 +621,7 @@ func (e *Engine) CalculateAttributes(nocode, attrApplied bool, depth int) map[st
 		"物理增伤": physInc, "属性攻击": elemBonus, "武器伤害": weaponDmg, "技能伤害": skillDmg,
 		"技能追伤": skillChase,
 		"独立增伤": indInc, "技能独立增伤": skillIndInc, "属性穿透": penetration, "无视防御": ignoreDef,
-		"技能无视防御": skillIgnoreDef, "技能速度": skillSpeed, "失衡易伤": imbalanceBonus,
+		"技能无视防御": skillIgnoreDef, "技能速度": 1 + skillSpeed, "失衡易伤": imbalanceBonus,
 		"技能倍率加数": skillAdd, "技能倍率乘数": skillMul,
 		"召唤物属性继承比例": inheritRatio, "召唤物攻击速度": summonAs,
 		"召唤物范围": summonRange, "召唤物伤害": summonDmg, "召唤物独立增伤": summonInd,
