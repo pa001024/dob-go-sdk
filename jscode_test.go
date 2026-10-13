@@ -1,4 +1,4 @@
-// BUFF code 语料回归：14 段真实 code 可解析、可执行。
+// BUFF code 语料回归：15 段真实 code 可解析、可执行。
 package dob
 
 import (
@@ -27,6 +27,7 @@ func jsSandbox() map[string]any {
 		"攻击": 1000.0, "生命": 5000.0, "神智": 300.0, "技能威力": 2.0, "技能范围": 1.5,
 		"技能耐久": 1.2, "昂扬": 0.5, "属性穿透": 0.1, "技能无视防御": 0.0,
 		"充盈威力": 1.0, "召唤物攻击速度": 0.5, "召唤物独立增伤": 0.0, "增伤": 0.5,
+		"技能速度": 2.0,
 		"char": clone(), "weapon": clone(), "meleeWeapon": clone(), "rangedWeapon": clone(), "skillWeapon": clone(),
 		"weaponAttr": pclone(), "meleeWeaponAttr": pclone(), "rangedWeaponAttr": pclone(), "skillWeaponAttr": pclone(),
 		"enemy":      map[string]any{"等级": 80},
@@ -38,7 +39,7 @@ func jsSandbox() map[string]any {
 
 func TestJsCodeCorpus(t *testing.T) {
 	corpus, ok := loadGolden(t, "jscode_corpus.json").([]any)
-	if !ok || len(corpus) != 14 {
+	if !ok || len(corpus) != 15 {
 		t.Fatalf("语料缺失: %v", corpus)
 	}
 	for _, entry := range corpus {
