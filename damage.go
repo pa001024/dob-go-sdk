@@ -33,9 +33,10 @@ func IsMultAttr(attr string) bool {
 	return strings.HasSuffix(attr, "独立增伤")
 }
 
-// CondRuleInput 条件规则输入（pattern 源码 + props）。
+// CondRuleInput 条件规则输入（pattern 源码 + 标签限定 + props）。
 type CondRuleInput struct {
 	Skill string
+	Tags  []string
 	Flags string
 	Props map[string]any
 }
@@ -81,12 +82,14 @@ func NewDamageContext(attrs, panels map[string]any, tables map[string][]map[stri
 			}
 		}
 		var re *regexp.Regexp
-		var err error
-		re, err = regexp.Compile(prefix + pattern)
-		if err != nil {
-			re = regexp.MustCompile(regexp.QuoteMeta(r.Skill))
+		if pattern != "" {
+			var err error
+			re, err = regexp.Compile(prefix + pattern)
+			if err != nil {
+				re = regexp.MustCompile(regexp.QuoteMeta(r.Skill))
+			}
 		}
-		c.Rules = append(c.Rules, CondRule{Re: re, Props: r.Props})
+		c.Rules = append(c.Rules, CondRule{Re: re, Tags: r.Tags, Props: r.Props})
 	}
 	return c
 }
@@ -158,17 +161,21 @@ func (c *DamageContext) GetSkillAttr(fieldName, base, ctxSafe string) map[string
 	return c.FindField(table, fieldName)
 }
 
-// CondProps 对齐 getConditionalBuffProps。
-func (c *DamageContext) CondProps(fieldName string) map[string]any {
+// CondProps 对齐 getConditionalBuffProps（字段名 + 字段标签双条件）。
+func (c *DamageContext) CondProps(base, fieldName string, fieldTags []string) map[string]any {
 	if fieldName == "" {
 		return nil
 	}
-	if r, ok := c.condCache[fieldName]; ok {
+	if base == "" {
+		base = c.BaseName
+	}
+	cacheKey := base + "::" + fieldName
+	if r, ok := c.condCache[cacheKey]; ok {
 		return r
 	}
 	var result map[string]any
 	for _, rule := range c.Rules {
-		if !rule.Re.MatchString(fieldName) {
+		if !MatchCondRule(rule, fieldName, fieldTags) {
 			continue
 		}
 		for prop, value := range rule.Props {
@@ -182,7 +189,7 @@ func (c *DamageContext) CondProps(fieldName string) map[string]any {
 			}
 		}
 	}
-	c.condCache[fieldName] = result
+	c.condCache[cacheKey] = result
 	return result
 }
 
@@ -301,7 +308,7 @@ func (c *DamageContext) SummonAttrs(base string, temp map[string]any, fieldName,
 	}
 	var conditional map[string]any
 	if fieldName != "" {
-		conditional = c.CondProps(fieldName)
+		conditional = c.CondProps(key, fieldName, FieldTags(summonField))
 	}
 	scoped := current
 	if len(conditional) > 0 {

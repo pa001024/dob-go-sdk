@@ -26,12 +26,19 @@ var ModMetaKeys = map[string]bool{
 // ModExclude 非属性键（已废弃：ModMetaKeys 的别名，仅为兼容保留）。
 var ModExclude = ModMetaKeys
 
-// BuffExclude 非属性键。
+// BuffExclude 非属性键（数值一律进 values/实例键，此表只拦元信息）。
 var BuffExclude = map[string]bool{
-	"id": true, "名称": true, "描述": true, "限定": true, "品质": true, "_等级": true,
+	"id": true, "名称": true, "描述": true, "限定": true, "_等级": true,
 	"_originalBuffData": true, "a": true, "b": true, "lx": true, "bx": true, "mx": true,
 	"dx": true, "pid": true, "pt": true, "code": true, "attr": true, "技能": true,
-	"_ratio": true, "_coverage": true,
+	"tag": true, "_ratio": true, "_coverage": true,
+}
+
+// BuffMetaKeys 原始行元信息键：旧格式顶层直挂折叠时跳过这些键（数值型元信息 a/b/lx/mx/dx 尤其不能计入）。
+var BuffMetaKeys = map[string]bool{
+	"id": true, "名称": true, "描述": true, "限定": true, "品质": true, "版本": true,
+	"a": true, "b": true, "dx": true, "lx": true, "mx": true, "code": true,
+	"技能": true, "tag": true, "attr": true, "display": true,
 }
 
 // JsRound 复刻 Math.round（half-up）。
@@ -56,12 +63,20 @@ func LevelBuff(raw map[string]any, level V, coverage, ratio float64) map[string]
 		"名称": raw["名称"], "描述": S(raw, "描述"),
 		"_original": raw, "_coverage": coverage, "_ratio": ratio,
 	}
-	for _, key := range []string{"a", "b", "lx", "mx", "dx", "技能", "code", "attr"} {
+	for _, key := range []string{"a", "b", "lx", "mx", "dx", "技能", "tag", "code", "attr"} {
 		v := raw[key]
 		if v == nil {
 			continue
 		}
 		if (key == "a" || key == "b") && Num(v) == 1 {
+			continue
+		}
+		if key == "tag" {
+			if tags, ok := v.([]any); ok && tags != nil {
+				cp := make([]any, len(tags))
+				copy(cp, tags)
+				inst[key] = cp
+			}
 			continue
 		}
 		inst[key] = v
@@ -92,6 +107,42 @@ func LevelBuff(raw map[string]any, level V, coverage, ratio float64) map[string]
 	return inst
 }
 
+// buffAttrSource 数值源：attr 子表优先，旧格式顶层直挂的数值/数值数组折叠补入
+// （对齐 TS 迁移前后；attr 与顶层同键时 attr 胜出）。字符串值为动态表达式，由 ApplyBuffAttr 求值，此处不处理。
+func buffAttrSource(raw map[string]any) map[string]any {
+	out := map[string]any{}
+	if attr, ok := raw["attr"].(map[string]any); ok && attr != nil {
+		for k, v := range attr {
+			out[k] = v
+		}
+	}
+	for k, v := range raw {
+		if BuffMetaKeys[k] {
+			continue
+		}
+		if _, dup := out[k]; dup {
+			continue
+		}
+		if IsNum(v) {
+			out[k] = v
+			continue
+		}
+		if l, ok := v.([]any); ok {
+			allNum := true
+			for _, e := range l {
+				if !IsNum(e) {
+					allNum = false
+					break
+				}
+			}
+			if allNum {
+				out[k] = v
+			}
+		}
+	}
+	return out
+}
+
 // BuffApplyLevel 复刻 _buff_apply_level。
 func BuffApplyLevel(inst, raw map[string]any) {
 	level := int(Num(inst["_等级"]))
@@ -120,10 +171,7 @@ func BuffApplyLevel(inst, raw map[string]any) {
 	if IsNum(raw["lx"]) {
 		lx = int(Num(raw["lx"]))
 	}
-	for prop, maxValue := range raw {
-		if BuffExclude[prop] {
-			continue
-		}
+	for prop, maxValue := range buffAttrSource(raw) {
 		if maxValue == nil {
 			continue
 		}
@@ -167,8 +215,13 @@ func BuffProperties(inst map[string]any) []string {
 	return out
 }
 
-// BuffIsLayerProp 是否 @ 层属性。
+// BuffIsLayerProp 是否 @ 层属性（新格式查 attr 子表，旧格式查顶层）。
 func BuffIsLayerProp(raw map[string]any, prop string) bool {
+	if attr, ok := raw["attr"].(map[string]any); ok && attr != nil {
+		if _, ok := attr["@"+prop]; ok {
+			return true
+		}
+	}
 	_, ok := raw["@"+prop]
 	return ok
 }
@@ -265,6 +318,7 @@ func modAttrDel(inst map[string]any, key string) {
 	}
 	inst["_attrKeys"] = out
 }
+
 // LevelMod 复刻 LeveledMod 构造 + updateProperties。
 func LevelMod(raw map[string]any, level, buffLv V, effectRaw map[string]any) map[string]any {
 	maxLevel := ModQualityMaxLevel[S(raw, "品质")]
@@ -1031,10 +1085,52 @@ func MergeConditional(base map[string]any, props map[string]any, isMult func(str
 	return merged
 }
 
-// CondRule 条件规则（编译后 pattern + props）。
+// CondRule 条件规则（编译后 pattern + 标签限定 + props）。
+// Re 为 nil 表示无技能名限定，Tags 为空表示无标签限定（两者都无的条目永不命中）。
 type CondRule struct {
 	Re    *regexp.Regexp
+	Tags  []string
 	Props map[string]any
+}
+
+// MatchCondRule 复刻 LeveledSkill.matchesFieldConditional。
+func MatchCondRule(rule CondRule, fieldName string, fieldTags []string) bool {
+	hasSkill := rule.Re != nil
+	hasTag := len(rule.Tags) > 0
+	if !hasSkill && !hasTag {
+		return false
+	}
+	if hasSkill && !rule.Re.MatchString(fieldName) {
+		return false
+	}
+	if hasTag && !tagsIntersect(rule.Tags, fieldTags) {
+		return false
+	}
+	return true
+}
+
+func tagsIntersect(want, have []string) bool {
+	for _, w := range want {
+		for _, h := range have {
+			if w == h {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// FieldTags 提取字段 tag 字符串表。
+func FieldTags(fm map[string]any) []string {
+	out := []string{}
+	if tags, ok := fm["tag"].([]any); ok {
+		for _, t := range tags {
+			if s, ok := t.(string); ok {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
 }
 
 // LevelSkillFieldsWithAttr 复刻 LeveledSkill.getFieldsWithAttr。
@@ -1082,7 +1178,7 @@ func LevelSkillFieldsWithAttr(skill map[string]any, attrs map[string]any, rules 
 		fieldAttrs := attrs
 		if attrs != nil && len(rules) > 0 {
 			for _, rule := range rules {
-				if rule.Re.MatchString(S(fm, "名称")) {
+				if MatchCondRule(rule, S(fm, "名称"), FieldTags(fm)) {
 					fieldAttrs = MergeConditional(fieldAttrs, rule.Props, isMult)
 				}
 			}

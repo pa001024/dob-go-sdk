@@ -466,6 +466,9 @@ func (e *Engine) ApplyBuffAttr(attrs map[string]any) bool {
 		ctx := e.DamageContext(attrs)
 		for key, expression := range exprs {
 			exprStr, _ := expression.(string)
+			if exprStr == "" {
+				continue
+			}
 			value, ok := evalBuffAttrExpr(ctx, attrs, exprStr)
 			if !ok {
 				continue
@@ -474,8 +477,9 @@ func (e *Engine) ApplyBuffAttr(attrs map[string]any) bool {
 				value = 0
 			}
 			value = value * NumD(buff["_coverage"], 1)
-			if !valuesEqual(buff[key], value) {
-				buff[key] = value
+			name := buffPropName(key)
+			if !valuesEqual(buff[name], value) {
+				buff[name] = value
 				changed = true
 			}
 		}
@@ -1147,11 +1151,7 @@ func (e *Engine) WeaponsKeys() []string {
 func (e *Engine) SkillTables(attrs map[string]any, rangedMulti ...float64) map[string][]map[string]any {
 	var rules []CondRule
 	for _, r := range e.ConditionalList() {
-		re, err := regexp.Compile(r.Pattern)
-		if err != nil {
-			re = regexp.MustCompile(regexp.QuoteMeta(r.Pattern))
-		}
-		rules = append(rules, CondRule{Re: re, Props: r.Props})
+		rules = append(rules, compileCondRule(r.Pattern, r.Tag, r.Props))
 	}
 	tables := map[string][]map[string]any{}
 	for _, s := range AsList(e.S["allSkills"]) {
@@ -1172,30 +1172,75 @@ func (e *Engine) SkillTables(attrs map[string]any, rangedMulti ...float64) map[s
 	return tables
 }
 
-// CondRuleOut 条件规则输出。
+// CondRuleOut 条件规则输出（技能名限定与标签限定可独立为空）。
 type CondRuleOut struct {
 	Skill   string
 	Pattern string
+	Tag     []string
 	Flags   string
 	Props   map[string]any
+}
+
+// condTags 提取 BUFF 实例的字段标签限定。
+func condTags(buff map[string]any) []string {
+	var tags []string
+	if list, ok := buff["tag"].([]any); ok {
+		for _, t := range list {
+			if s, ok := t.(string); ok {
+				tags = append(tags, s)
+			}
+		}
+	}
+	return tags
+}
+
+// compileCondRule 编译条件规则：空 pattern 表示无技能名限定（Re 留空）。
+func compileCondRule(pattern string, tags []string, props map[string]any) CondRule {
+	if pattern == "" {
+		return CondRule{Tags: tags, Props: props}
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		re = regexp.MustCompile(regexp.QuoteMeta(pattern))
+	}
+	return CondRule{Re: re, Tags: tags, Props: props}
+}
+
+// condGroupKey 条件分组键：技能名 + 标签集合（同条件聚合数值）。
+func condGroupKey(skill string, tags []string) string {
+	return skill + "\x00" + strings.Join(tags, "\x00")
+}
+
+// hasCondTarget 是否带字段限定（技能名或标签任一）。
+func hasCondTarget(buff map[string]any) bool {
+	if _, ok := buff["技能"].(string); ok {
+		return true
+	}
+	return len(condTags(buff)) > 0
 }
 
 // ConditionalList 复刻 getConditionalBuffPropsList。
 func (e *Engine) ConditionalList() []CondRuleOut {
 	grouped := map[string]map[string]any{}
 	var order []string
+	meta := map[string]string{}
+	metaTags := map[string][]string{}
 	for _, b := range AsList(e.S["buffs"]) {
 		buff, ok := b.(map[string]any)
 		if !ok || buff == nil {
 			continue
 		}
-		pattern, ok := buff["技能"].(string)
-		if !ok {
+		skill, _ := buff["技能"].(string)
+		tags := condTags(buff)
+		if skill == "" && len(tags) == 0 {
 			continue
 		}
-		if _, ok := grouped[pattern]; !ok {
-			grouped[pattern] = map[string]any{}
-			order = append(order, pattern)
+		key := condGroupKey(skill, tags)
+		if _, ok := grouped[key]; !ok {
+			grouped[key] = map[string]any{}
+			order = append(order, key)
+			meta[key] = skill
+			metaTags[key] = tags
 		}
 		for _, prop := range BuffProperties(buff) {
 			value, ok := buff[prop]
@@ -1203,15 +1248,15 @@ func (e *Engine) ConditionalList() []CondRuleOut {
 				continue
 			}
 			if IsMultAttr(prop) {
-				grouped[pattern][prop] = (1+Num(grouped[pattern][prop]))*(1+Num(value)) - 1
+				grouped[key][prop] = (1+Num(grouped[key][prop]))*(1+Num(value)) - 1
 			} else {
-				grouped[pattern][prop] = Num(grouped[pattern][prop]) + Num(value)
+				grouped[key][prop] = Num(grouped[key][prop]) + Num(value)
 			}
 		}
 	}
 	var rules []CondRuleOut
-	for _, p := range order {
-		rules = append(rules, CondRuleOut{Skill: p, Pattern: p, Props: grouped[p]})
+	for _, key := range order {
+		rules = append(rules, CondRuleOut{Skill: meta[key], Pattern: meta[key], Tag: metaTags[key], Props: grouped[key]})
 	}
 	rules = append(rules, e.codeConditionals()...)
 	return rules
@@ -1221,13 +1266,13 @@ func (e *Engine) codeConditionals() []CondRuleOut {
 	var scoped []map[string]any
 	for _, b := range AsList(e.S["dynamicBuffs"]) {
 		if buff, ok := b.(map[string]any); ok && buff != nil {
-			if _, ok := buff["技能"].(string); ok {
+			if hasCondTarget(buff) {
 				scoped = append(scoped, buff)
 			}
 		}
 	}
 	for _, buff := range e.effectCodeBuffs() {
-		if _, ok := buff["技能"].(string); ok {
+		if hasCondTarget(buff) {
 			scoped = append(scoped, buff)
 		}
 	}
@@ -1264,7 +1309,7 @@ func (e *Engine) codeConditionals() []CondRuleOut {
 				props[key] = Num(value) - Num(before)
 			}
 		}
-		out = append(out, CondRuleOut{Skill: S(buff, "技能"), Pattern: S(buff, "技能"), Props: props})
+		out = append(out, CondRuleOut{Skill: S(buff, "技能"), Pattern: S(buff, "技能"), Tag: condTags(buff), Props: props})
 	}
 	return out
 }
@@ -1569,7 +1614,7 @@ func (e *Engine) DamageContext(attrs map[string]any) *DamageContext {
 	}
 	var rules []CondRuleInput
 	for _, r := range e.ConditionalList() {
-		rules = append(rules, CondRuleInput{Skill: r.Pattern, Flags: r.Flags, Props: r.Props})
+		rules = append(rules, CondRuleInput{Skill: r.Pattern, Tags: r.Tag, Flags: r.Flags, Props: r.Props})
 	}
 	var skillNames []map[string]any
 	for _, entry := range AsList(e.S["skill_name_list"]) {
