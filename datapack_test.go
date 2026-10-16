@@ -85,3 +85,95 @@ func TestZipManifestRoundtrip(t *testing.T) {
 		t.Errorf("未激活应报错")
 	}
 }
+
+func TestDataPackMajorNormalize(t *testing.T) {
+	if DataPackFormatMajor <= 0 {
+		t.Fatalf("major 非正整数: %d", DataPackFormatMajor)
+	}
+	if got := NormalizeDataPackMajor(1, "1.7.4.1"); got != 1 {
+		t.Errorf("显式 1: %d", got)
+	}
+	if got := NormalizeDataPackMajor(2, "1.1.86.1"); got != 2 {
+		t.Errorf("显式 2: %d", got)
+	}
+	cases := []struct {
+		major   any
+		version string
+		want    int
+	}{
+		{nil, "1.6.208.6", 1},
+		{nil, "1.6.208.7", 2},
+		{nil, "1.7.4.1", 2},
+		{nil, "", 1},
+	}
+	for _, c := range cases {
+		if got := NormalizeDataPackMajor(c.major, c.version); got != c.want {
+			t.Errorf("normalize(%v, %q) = %d, want %d", c.major, c.version, got, c.want)
+		}
+	}
+	if CompareDataPackVersions("1.6.208.10", "1.6.208.7") != 1 {
+		t.Errorf("数字段比较失败")
+	}
+	if CompareDataPackVersions("1.7.3.1", "1.6.208.7") != 1 {
+		t.Errorf("跨次版本比较失败")
+	}
+	if !IsDataPackMajorSupported(1, "1.6.208.6") || !IsDataPackMajorSupported(nil, "1.6.208.6") {
+		t.Errorf("兼容包应支持")
+	}
+	if IsDataPackMajorSupported(DataPackFormatMajor+1, "9.9.9.9") {
+		t.Errorf("超前包不应支持")
+	}
+}
+
+func writeTestPack(t *testing.T, dir, version, manifest string) {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, _ := zw.Create("manifest.json")
+	_, _ = w.Write([]byte(manifest))
+	w2, _ := zw.Create("modules/mod.msgpack")
+	_, _ = w2.Write(packModMsgpack)
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	verDir := filepath.Join(dir, version)
+	if err := os.MkdirAll(verDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(verDir, "package.zip"), buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestActivateRejectsUnsupportedMajor(t *testing.T) {
+	dir, err := os.MkdirTemp("", "dob-pack-major")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	writeTestPack(t, dir, "new", `{"version":"new","major":99,"modules":{}}`)
+	pack := NewDataPackStore(dir, "", "-")
+	if _, err := pack.Activate("new"); err == nil {
+		t.Fatalf("超前包应拒绝")
+	} else if apiErr, ok := err.(*DobApiError); !ok || apiErr.Code != "unsupported_pack" {
+		t.Fatalf("错误码应为 unsupported_pack: %v", err)
+	}
+}
+
+func TestEnsureFallsBackToSupported(t *testing.T) {
+	dir, err := os.MkdirTemp("", "dob-pack-major")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	writeTestPack(t, dir, "old", `{"version":"old","major":1,"modules":{}}`)
+	writeTestPack(t, dir, "new", `{"version":"new","major":99,"modules":{}}`)
+	pack := NewDataPackStore(dir, "", "-")
+	m, err := pack.Ensure("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pack.ActiveVersion() != "old" || S(m, "version") != "old" {
+		t.Errorf("应回退到兼容版: %v", m)
+	}
+}

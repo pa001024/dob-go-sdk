@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -23,7 +26,86 @@ const (
 	ModulesPrefix = "modules/"
 	// DefaultVersionsFile 版本列表文件名。
 	DefaultVersionsFile = "versions.json"
+	// DataPackFormatMajor 数据包格式 major：与打包侧统一自增，改动包格式、老读包侧会崩时加一。
+	DataPackFormatMajor = 2
+	// DataPackLegacyCutoffVersion 历史分割线：自该版起 MOD 数值挪进加成，缺 major 的老条目按此推断。
+	DataPackLegacyCutoffVersion = "1.6.208.7"
 )
+
+// dataPackVersionParts 版本号按点切分转数字段，非数字段按零处理。
+func dataPackVersionParts(version string) []int {
+	segs := strings.Split(version, ".")
+	out := make([]int, 0, len(segs))
+	for _, seg := range segs {
+		n, err := strconv.Atoi(seg)
+		if err != nil {
+			n = 0
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// CompareDataPackVersions 按数字段比较版本号，长度不等时短者补零。
+func CompareDataPackVersions(a, b string) int {
+	pa, pb := dataPackVersionParts(a), dataPackVersionParts(b)
+	n := len(pa)
+	if len(pb) > n {
+		n = len(pb)
+	}
+	for i := 0; i < n; i++ {
+		var x, y int
+		if i < len(pa) {
+			x = pa[i]
+		}
+		if i < len(pb) {
+			y = pb[i]
+		}
+		if x != y {
+			if x > y {
+				return 1
+			}
+			return -1
+		}
+	}
+	return 0
+}
+
+// NormalizeDataPackMajor 归一化 major：合法正整数直接采用；缺失/非法时按历史分割线推断。
+func NormalizeDataPackMajor(major any, version string) int {
+	var num int
+	valid := false
+	switch t := major.(type) {
+	case int:
+		num, valid = t, true
+	case int64:
+		num, valid = int(t), true
+	case float64:
+		if t == math.Trunc(t) {
+			num, valid = int(t), true
+		}
+	case json.Number:
+		if n, err := t.Int64(); err == nil {
+			num, valid = int(n), true
+		}
+	case string:
+		if n, err := strconv.Atoi(t); err == nil {
+			num, valid = n, true
+		}
+	}
+	if valid && num > 0 {
+		return num
+	}
+	if version != "" && CompareDataPackVersions(version, DataPackLegacyCutoffVersion) >= 0 {
+		return 2
+	}
+	return 1
+}
+
+// IsDataPackMajorSupported 当前 SDK 是否能读取该 major 的包。
+func IsDataPackMajorSupported(major any, version string) bool {
+	return NormalizeDataPackMajor(major, version) <= DataPackFormatMajor
+}
 
 // RevivePackedValue 还原打包时的特殊类型（对齐前端 revivePackedValue，递归还原）。
 func RevivePackedValue(value any) any {
@@ -144,8 +226,22 @@ func (s *DataPackStore) bases() []string {
 	return out
 }
 
-// RemoteVersions 读远端 versions.json（主备依次尝试）。
+// RemoteVersions 读远端 versions.json（主备依次尝试；跳过当前不支持的新格式包）。
 func (s *DataPackStore) RemoteVersions() ([]map[string]any, error) {
+	versions, err := s.fetchRemoteVersions()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(versions))
+	for _, v := range versions {
+		if IsDataPackMajorSupported(v["major"], S(v, "version")) {
+			out = append(out, v)
+		}
+	}
+	return out, nil
+}
+
+func (s *DataPackStore) fetchRemoteVersions() ([]map[string]any, error) {
 	var last error
 	for _, base := range s.bases() {
 		raw, err := s.getBytes(base+"/"+DefaultVersionsFile, 30*time.Second)
@@ -205,7 +301,7 @@ func (s *DataPackStore) PackageURL(version string) string {
 	return fmt.Sprintf("%s/%s.zip", s.DataPackBase, version)
 }
 
-// Download 下载整包并激活。version 为空取远端最新；返回 manifest。
+// Download 下载整包并激活。version 为空取远端最新兼容版；返回 manifest。
 func (s *DataPackStore) Download(version string, progress ProgressFunc) (map[string]any, error) {
 	if version == "" {
 		versions, err := s.RemoteVersions()
@@ -213,9 +309,16 @@ func (s *DataPackStore) Download(version string, progress ProgressFunc) (map[str
 			return nil, err
 		}
 		if len(versions) == 0 {
-			return nil, httpErrorf(0, "http_error", "远端版本列表为空")
+			return nil, httpErrorf(0, "http_error", "远端无兼容的数据包版本")
 		}
 		version = S(versions[0], "version")
+	} else if versions, err := s.fetchRemoteVersions(); err == nil {
+		for _, v := range versions {
+			if S(v, "version") == version && !IsDataPackMajorSupported(v["major"], version) {
+				return nil, httpErrorf(0, "unsupported_pack", "数据包版本 %s 需要更新 SDK 后才能读取（major=%d，当前支持到 %d）",
+					version, NormalizeDataPackMajor(v["major"], version), DataPackFormatMajor)
+			}
+		}
 	}
 	destDir := filepath.Join(s.CacheDir, version)
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
@@ -287,6 +390,14 @@ func (s *DataPackStore) Activate(version string) (map[string]any, error) {
 	manifest, err := s.readManifestFromZip(version)
 	if err != nil {
 		return nil, err
+	}
+	manifestVersion := S(manifest, "version")
+	if manifestVersion == "" {
+		manifestVersion = version
+	}
+	if !IsDataPackMajorSupported(manifest["major"], manifestVersion) {
+		return nil, &DobApiError{Message: fmt.Sprintf("数据包版本 %s 需要更新 SDK 后才能读取（major=%d，当前支持到 %d）",
+			version, NormalizeDataPackMajor(manifest["major"], manifestVersion), DataPackFormatMajor), Code: "unsupported_pack"}
 	}
 	s.manifest = manifest
 	s.activeVersion = version
@@ -378,13 +489,27 @@ func (s *DataPackStore) LoadExport(moduleKey, exportName string) (any, error) {
 	return m[exportName], nil
 }
 
-// Ensure 保证有可用版本：已安装则激活最新，否则下载（缺省远端最新）。返回 manifest。
+// Ensure 保证有可用版本：已安装则激活最新兼容版，否则下载（缺省远端最新兼容版）。返回 manifest。
 func (s *DataPackStore) Ensure(version string) (map[string]any, error) {
 	if version != "" {
 		return s.Activate(version)
 	}
 	if installed := s.InstalledVersions(); len(installed) > 0 {
-		return s.Activate(installed[len(installed)-1])
+		var lastErr error
+		for i := len(installed) - 1; i >= 0; i-- {
+			m, err := s.Activate(installed[i])
+			if err == nil {
+				return m, nil
+			}
+			if apiErr, ok := err.(*DobApiError); !ok || apiErr.Code != "unsupported_pack" {
+				return nil, err
+			}
+			lastErr = err
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, &DobApiError{Message: "本地无兼容的数据包版本", Code: "unsupported_pack"}
 	}
 	return s.Download("", nil)
 }
