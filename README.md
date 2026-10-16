@@ -42,6 +42,6 @@ snapshot.Evaluate("角色::攻击!")
 cd sdk/go && go test ./...
 ```
 
-46 tests 全过（含 2 个性能基线；真实包基线需 `mock/data-pack/1.6.208.6.zip`）。测试清单与 Python 对应：parity 42 式、attrs/panels、技能等级 trio + 溯源、6 线上 BD（DOT 分流）、14 段 BUFF code 语料、快照、数据源抽象、形状归一化、AST 求值。
+46 tests 全过（含 2 个性能基线；真实包基线需 `mock/data-pack/1.6.208.8.zip`）。测试清单与 Python 对应：parity 42 式、attrs/panels、技能等级 trio + 溯源、6 线上 BD（DOT 分流）、14 段 BUFF code 语料、快照、数据源抽象、形状归一化、AST 求值。
 
 示例：`go run ./examples/panels [fixture|datapack|modules]`、`go run ./examples/snapshot <bdid> [datapack|modules] [表达式...]`。

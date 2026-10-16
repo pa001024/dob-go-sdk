@@ -9,10 +9,10 @@ import (
 )
 
 // 钉住的数据包版本（条数锚点与之绑定）。
-const pinVersion = "1.6.208.6"
+const pinVersion = "1.6.208.8"
 
 var pinCounts = map[string]int{
-	"chars": 33, "mods": 586, "buffs": 187, "effects": 65,
+	"chars": 33, "mods": 586, "buffs": 209, "effects": 71,
 	"weapons": 71, "pets": 152, "pet_entries": 73, "monsters": 393,
 }
 
@@ -86,6 +86,9 @@ func TestDatapackPerf(t *testing.T) {
 	}
 	if S(manifest, "version") != pinVersion {
 		t.Errorf("manifest 版本: %v", S(manifest, "version"))
+	}
+	if Num(manifest["major"]) != 2 {
+		t.Errorf("manifest major: %v", manifest["major"])
 	}
 	bestAct := best(actTimes)
 	t.Logf("[perf] datapack activate(%s) best-of-%d: %v", pinVersion, perfRounds, bestAct)
