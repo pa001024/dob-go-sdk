@@ -1,4 +1,4 @@
-// BUFF 结构化 attr 与 tag 条件单测（新格式 attr 子表 + 旧格式顶层折叠）。
+// BUFF 结构化 attr 与 tag 条件单测（attr 子表口径）。
 package dob
 
 import (
@@ -43,128 +43,12 @@ func TestBuffAttrStaticsNewShape(t *testing.T) {
 	}
 }
 
-func TestBuffAttrOldShapeFold(t *testing.T) {
-	raw := map[string]any{"名称": "旧", "mx": 2, "攻击": 0.5, "暴击": []any{0.1, 0.2}}
-	inst := LevelBuff(raw, 1, 1, 1)
-	if got := Num(inst["攻击"]); got != 0.5 {
-		t.Errorf("旧顶层数值折叠: got %v want 0.5", got)
-	}
-	if got := Num(inst["暴击"]); got != 0.1 {
-		t.Errorf("旧顶层数组折叠: got %v want 0.1", got)
-	}
-	if !BuffIsLayerProp(map[string]any{"@近战增伤": 0.6}, "近战增伤") {
-		t.Errorf("旧顶层 @ 判定失败")
-	}
-}
-
-func TestBuffAttrPrecedence(t *testing.T) {
-	raw := map[string]any{"名称": "冲突", "攻击": 0.1, "attr": map[string]any{"攻击": 0.5}}
-	inst := LevelBuff(raw, 1, 1, 1)
-	if got := Num(inst["攻击"]); got != 0.5 {
-		t.Errorf("attr 应优先于顶层: got %v want 0.5", got)
-	}
-}
-
 func TestLevelBuffCopiesTag(t *testing.T) {
 	raw := map[string]any{"名称": "充盈条件", "tag": []any{"充盈"}, "attr": map[string]any{"独立增伤": 0.2}}
 	inst := LevelBuff(raw, 1, 1, 1)
 	tags, ok := inst["tag"].([]any)
 	if !ok || len(tags) != 1 || tags[0] != "充盈" {
 		t.Fatalf("tag 未复制: %v", inst["tag"])
-	}
-}
-
-var buffShapeMeta = map[string]bool{
-	"id": true, "名称": true, "描述": true, "限定": true, "品质": true, "版本": true,
-	"a": true, "b": true, "dx": true, "lx": true, "mx": true, "code": true,
-	"技能": true, "tag": true, "attr": true, "display": true,
-}
-
-// toNewBuffShape 把旧格式行（顶层直挂数值）转成新格式（数值进 attr），复刻 TS 迁移脚本。
-func toNewBuffShape(row map[string]any) map[string]any {
-	out := map[string]any{}
-	for k, v := range row {
-		out[k] = v
-	}
-	attr := map[string]any{}
-	if a, ok := row["attr"].(map[string]any); ok && a != nil {
-		for k, v := range a {
-			attr[k] = v
-		}
-	}
-	for k, v := range row {
-		if buffShapeMeta[k] {
-			continue
-		}
-		if _, dup := attr[k]; dup {
-			delete(out, k)
-			continue
-		}
-		if IsNum(v) {
-			attr[k] = v
-			delete(out, k)
-			continue
-		}
-		if l, ok := v.([]any); ok {
-			allNum := true
-			for _, e := range l {
-				if !IsNum(e) {
-					allNum = false
-					break
-				}
-			}
-			if allNum {
-				attr[k] = v
-				delete(out, k)
-			}
-		}
-	}
-	if len(attr) > 0 {
-		out["attr"] = attr
-	}
-	return out
-}
-
-func convertBuffTable(list []any) []any {
-	out := make([]any, 0, len(list))
-	for _, e := range list {
-		if m, ok := e.(map[string]any); ok && m != nil {
-			out = append(out, toNewBuffShape(m))
-			continue
-		}
-		out = append(out, e)
-	}
-	return out
-}
-
-// TestNewShapeParity 碎片 BD 在新格式表下 42 表达式与 golden `ts` 逐位一致。
-func TestNewShapeParity(t *testing.T) {
-	bd := loadGolden(t, "shardBuild1_bd.json").(map[string]any)
-	data := loadGolden(t, "shardBuild1_data.json").(map[string]any)
-	expr := loadGolden(t, "shardBuild1_expr.json").(map[string]any)
-	data2 := map[string]any{}
-	for k, v := range data {
-		data2[k] = v
-	}
-	data2["buffs"] = convertBuffTable(AsList(data["buffs"]))
-	data2["effects"] = convertBuffTable(AsList(data["effects"]))
-	tables := tablesFor(t, data2)
-	charID := int(Num(bd["charId"]))
-	settings, _ := bd["settings"].(map[string]any)
-	state, err := BuildState(charID, settings, tables, BuildOptions{})
-	if err != nil {
-		t.Fatalf("装配失败: %v", err)
-	}
-	engine := NewEngine(state, tables)
-	cases := expr["cases"].([]any)
-	for _, c := range cases {
-		cm := c.(map[string]any)
-		name, _ := cm["expr"].(string)
-		want := Num(cm["ts"])
-		got := engine.Calculate(name)
-		if !isClose(got, want) {
-			t.Errorf("表达式 %s: mine=%v ref=%v", name, got, want)
-		}
 	}
 }
 

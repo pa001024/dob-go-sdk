@@ -480,6 +480,7 @@ func (e *Engine) ApplyBuffAttr(attrs map[string]any) bool {
 			name := buffPropName(key)
 			if !valuesEqual(buff[name], value) {
 				buff[name] = value
+				buffAttrAdd(buff, name)
 				changed = true
 			}
 		}
@@ -553,6 +554,8 @@ func (e *Engine) CalculateAttributes(nocode, attrApplied bool, depth int) map[st
 	skillTrigger := bonuses[idx["技能触发"]]
 	anomaly := bonuses[idx["异常数量"]]
 	petCdReduce := bonuses[idx["魔灵CD缩减"]]
+	// 神智回复（每 3 秒额外回复量，0 起始）不在 bonus 向量里，单独汇总
+	sanityRegenBonus := e.GetTotal("神智回复", "角色", true)
 	char := charOf(e.S)
 	modAttrBonus := e.GetTotal(S(char, "属性")+"MOD属性", "角色", true)
 	if modAttrBonus > 0 {
@@ -589,6 +592,7 @@ func (e *Engine) CalculateAttributes(nocode, attrApplied bool, depth int) map[st
 		summonRange += modAttrBonus * e.GetModsBonus(elm, "召唤物范围", "角色")
 		summonDmg += modAttrBonus * e.GetModsBonus(elm, "召唤物伤害", "角色")
 		summonInd += modAttrBonus * e.GetModsBonus(elm, "召唤物独立增伤", "角色")
+		sanityRegenBonus += modAttrBonus * e.GetModsBonus(elm, "神智回复", "角色")
 	}
 	resonance := Num(e.S["resonanceGain"])
 	attack := Num(char["基础攻击"]) * (1 + attackBonus + resonance)
@@ -636,6 +640,8 @@ func (e *Engine) CalculateAttributes(nocode, attrApplied bool, depth int) map[st
 		"转属逆": convert["转属逆"], "充盈威力": fullnessBonus, "技能触发": skillTrigger,
 		"异常数量": anomalyVal,
 		"魔灵CD": petCd, "魔灵CD缩减": pyClamp(petCdReduce, 0, 1),
+		// 神智回复总量（每 3 秒）：自然回复 + BUFF / MOD 持续性额外回复
+		"神智回复": sanityRegenBonus + 2 + math.Floor(sanity/200),
 	}
 	var condMods []any
 	for _, m := range listOf(e.S, "charMods") {

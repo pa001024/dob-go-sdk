@@ -85,14 +85,15 @@ func weaponBuffLv(effectConfig map[string]any, tables *GameDataTables, weaponID 
 }
 
 func customBuff(buffsCfg []any, level int, coverage float64) map[string]any {
-	raw := map[string]any{"名称": "自定义BUFF", "描述": "自行填写"}
+	attr := map[string]any{}
 	for _, entry := range buffsCfg {
 		if pair, ok := entry.([]any); ok && len(pair) >= 2 {
 			if k, ok := pair[0].(string); ok {
-				raw[k] = pair[1]
+				attr[k] = pair[1]
 			}
 		}
 	}
+	raw := map[string]any{"名称": "自定义BUFF", "描述": "自行填写", "attr": attr}
 	buff := LevelBuff(raw, level, coverage, 1)
 	if coverage != 1 {
 		buff["_coverage"] = coverage
@@ -678,17 +679,39 @@ func BuildState(charID int, settings map[string]any, tables *GameDataTables, opt
 	if state["targetFunction"] == "" {
 		state["targetFunction"] = "伤害"
 	}
-	var plainBuffs []any
-	var dynamicBuffs []any
-	for _, b := range buffs {
-		hasCode := S(b, "code") != ""
-		propCount := 0
-		for k := range b {
-			if !BuffExclude[k] && !(len(k) > 0 && k[0] == '_') {
-				propCount++
+	// BUFF 与 MOD 互斥：装备 `禁用` 列出的任一 MOD 时该 BUFF 不生效
+	// （对齐 TS `CharBuild.isBuffDisabled`）。
+	equippedModIDs := map[int]bool{}
+	for _, list := range [][]any{charMods, meleeMods, rangedMods, skillMods} {
+		for _, item := range list {
+			mod, ok := item.(map[string]any)
+			if ok && mod != nil {
+				equippedModIDs[int(Num(mod["id"]))] = true
 			}
 		}
-		if !hasCode || propCount > 0 {
+	}
+	if aura != nil {
+		equippedModIDs[int(Num(aura["id"]))] = true
+	}
+	activeBuffs := make([]map[string]any, 0, len(buffs))
+	for _, buff := range buffs {
+		disabled := false
+		for _, id := range AsList(buff["禁用"]) {
+			if equippedModIDs[int(Num(id))] {
+				disabled = true
+				break
+			}
+		}
+		if !disabled {
+			activeBuffs = append(activeBuffs, buff)
+		}
+	}
+
+	var plainBuffs []any
+	var dynamicBuffs []any
+	for _, b := range activeBuffs {
+		hasCode := S(b, "code") != ""
+		if !hasCode || len(BuffProperties(b)) > 0 {
 			plainBuffs = append(plainBuffs, b)
 		}
 		if hasCode {

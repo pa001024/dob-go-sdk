@@ -11,35 +11,7 @@ import (
 // ModQualityMaxLevel 品质 → MOD 满级。
 var ModQualityMaxLevel = map[string]int{"金": 10, "紫": 5, "蓝": 5, "绿": 3, "白": 3}
 
-// ModMetaKeys MOD 原始数据中的非属性元信息键。
-//
-// 词条数值只从 `加成` 读取（含兼容折叠的旧格式顶层直挂数值），其余顶层键均为元信息。
-// 此表仅用于兼容旧格式数据包（如仍把数值挂在顶层的包）：构造时把这类遗留直挂数值折叠进加成，
-// 此后统一按加成口径计算，不再枚举实例自有键反推属性。
-var ModMetaKeys = map[string]bool{
-	"id": true, "icon": true, "名称": true, "版本": true, "系列": true, "品质": true,
-	"极性": true, "耐受": true, "类型": true, "属性": true, "限定": true, "描述": true,
-	"效果": true, "消耗": true, "技能替换": true, "buff": true, "生效": true,
-	"加成": true,
-}
 
-// ModExclude 非属性键（已废弃：ModMetaKeys 的别名，仅为兼容保留）。
-var ModExclude = ModMetaKeys
-
-// BuffExclude 非属性键（数值一律进 values/实例键，此表只拦元信息）。
-var BuffExclude = map[string]bool{
-	"id": true, "名称": true, "描述": true, "限定": true, "_等级": true,
-	"_originalBuffData": true, "a": true, "b": true, "lx": true, "bx": true, "mx": true,
-	"dx": true, "pid": true, "pt": true, "code": true, "attr": true, "技能": true,
-	"tag": true, "_ratio": true, "_coverage": true,
-}
-
-// BuffMetaKeys 原始行元信息键：旧格式顶层直挂折叠时跳过这些键（数值型元信息 a/b/lx/mx/dx 尤其不能计入）。
-var BuffMetaKeys = map[string]bool{
-	"id": true, "名称": true, "描述": true, "限定": true, "品质": true, "版本": true,
-	"a": true, "b": true, "dx": true, "lx": true, "mx": true, "code": true,
-	"技能": true, "tag": true, "attr": true, "display": true,
-}
 
 // JsRound 复刻 Math.round（half-up）。
 func JsRound(x float64) int { return int(math.Floor(x + 0.5)) }
@@ -57,13 +29,30 @@ func buffPropName(prop string) string {
 	return prop
 }
 
+func buffAttrKeys(inst map[string]any) []string {
+	if l, ok := inst["_attrKeys"].([]string); ok && l != nil {
+		return l
+	}
+	return []string{}
+}
+
+func buffAttrAdd(inst map[string]any, key string) {
+	for _, k := range buffAttrKeys(inst) {
+		if k == key {
+			return
+		}
+	}
+	inst["_attrKeys"] = append(buffAttrKeys(inst), key)
+}
+
 // LevelBuff 复刻 LeveledBuff 构造 + updatePropertiesByLevel。
 func LevelBuff(raw map[string]any, level V, coverage, ratio float64) map[string]any {
 	inst := map[string]any{
 		"名称": raw["名称"], "描述": S(raw, "描述"),
 		"_original": raw, "_coverage": coverage, "_ratio": ratio,
+		"_attrKeys": []string{},
 	}
-	for _, key := range []string{"a", "b", "lx", "mx", "dx", "技能", "tag", "code", "attr"} {
+	for _, key := range []string{"a", "b", "lx", "mx", "dx", "技能", "tag", "禁用", "code", "attr"} {
 		v := raw[key]
 		if v == nil {
 			continue
@@ -107,43 +96,20 @@ func LevelBuff(raw map[string]any, level V, coverage, ratio float64) map[string]
 	return inst
 }
 
-// buffAttrSource 数值源：attr 子表优先，旧格式顶层直挂的数值/数值数组折叠补入
-// （对齐 TS 迁移前后；attr 与顶层同键时 attr 胜出）。字符串值为动态表达式，由 ApplyBuffAttr 求值，此处不处理。
+// buffAttrSource 数值源：直接取 attr 子表。字符串值为动态表达式，由 ApplyBuffAttr 求值，此处不处理。
 func buffAttrSource(raw map[string]any) map[string]any {
-	out := map[string]any{}
-	if attr, ok := raw["attr"].(map[string]any); ok && attr != nil {
-		for k, v := range attr {
-			out[k] = v
-		}
+	attr, ok := raw["attr"].(map[string]any)
+	if !ok || attr == nil {
+		return map[string]any{}
 	}
-	for k, v := range raw {
-		if BuffMetaKeys[k] {
-			continue
-		}
-		if _, dup := out[k]; dup {
-			continue
-		}
-		if IsNum(v) {
-			out[k] = v
-			continue
-		}
-		if l, ok := v.([]any); ok {
-			allNum := true
-			for _, e := range l {
-				if !IsNum(e) {
-					allNum = false
-					break
-				}
-			}
-			if allNum {
-				out[k] = v
-			}
-		}
+	out := make(map[string]any, len(attr))
+	for k, v := range attr {
+		out[k] = v
 	}
 	return out
 }
 
-// BuffApplyLevel 复刻 _buff_apply_level。
+// BuffApplyLevel 复刻 _buff_apply_level（属性键显式登记，不再枚举实例自有键）。
 func BuffApplyLevel(inst, raw map[string]any) {
 	level := int(Num(inst["_等级"]))
 	if lx := raw["lx"]; IsNum(lx) {
@@ -159,6 +125,7 @@ func BuffApplyLevel(inst, raw map[string]any) {
 		level = mx
 	}
 	inst["_等级"] = level
+	inst["_attrKeys"] = []string{}
 	a := NumOrZero(inst["a"])
 	if a == 0 {
 		a = 1
@@ -193,72 +160,44 @@ func BuffApplyLevel(inst, raw map[string]any) {
 				v = Num(list[idx])
 			}
 			inst[name] = v * Num(inst["_ratio"]) * Num(inst["_coverage"])
+			buffAttrAdd(inst, name)
 		} else if IsNum(maxValue) {
 			value := (Num(maxValue) / a) * (1 + float64(level-lx)/b) * Num(inst["_ratio"]) * Num(inst["_coverage"])
 			if name == "神智回复" {
 				value = float64(JsRound(value))
 			}
 			inst[name] = value
+			buffAttrAdd(inst, name)
 		}
 	}
 }
 
-// BuffProperties 属性键列表（恒返回非 nil，与 Python [] 口径一致）。
+// BuffProperties 属性键列表（显式键表：仅 attr 物化出的键，恒返回非 nil，与 Python [] 口径一致）。
 func BuffProperties(inst map[string]any) []string {
 	out := []string{}
-	for k := range inst {
-		if BuffExclude[k] || (len(k) > 0 && k[0] == '_') {
-			continue
-		}
-		out = append(out, k)
-	}
+	out = append(out, buffAttrKeys(inst)...)
 	return out
 }
 
-// BuffIsLayerProp 是否 @ 层属性（新格式查 attr 子表，旧格式查顶层）。
+// BuffIsLayerProp 是否 @ 层属性（查 attr 子表）。
 func BuffIsLayerProp(raw map[string]any, prop string) bool {
-	if attr, ok := raw["attr"].(map[string]any); ok && attr != nil {
-		if _, ok := attr["@"+prop]; ok {
-			return true
-		}
+	attr, ok := raw["attr"].(map[string]any)
+	if !ok || attr == nil {
+		return false
 	}
-	_, ok := raw["@"+prop]
+	_, ok = attr["@"+prop]
 	return ok
 }
 
-// modBonus 解析原始 MOD 数据的词条加成（复刻 TS 加成口径）。
-// 加成表优先采用 `加成`，旧格式顶层直挂的数值/数值数组折叠补入。
-// 返回新对象，不污染上游静态数据。
+// modBonus 解析原始 MOD 数据的词条加成（直接取 加成 表）。
 func modBonus(raw map[string]any) map[string]any {
-	bonus := map[string]any{}
-	if b, ok := raw["加成"].(map[string]any); ok && b != nil {
-		for k, v := range b {
-			bonus[k] = v
-		}
+	b, ok := raw["加成"].(map[string]any)
+	if !ok || b == nil {
+		return map[string]any{}
 	}
-	for k, v := range raw {
-		if ModMetaKeys[k] {
-			continue
-		}
-		if _, dup := bonus[k]; dup {
-			continue
-		}
-		if IsNum(v) {
-			bonus[k] = v
-			continue
-		}
-		if l, ok := v.([]any); ok {
-			allNum := true
-			for _, e := range l {
-				if !IsNum(e) {
-					allNum = false
-					break
-				}
-			}
-			if allNum {
-				bonus[k] = append([]any{}, l...)
-			}
-		}
+	bonus := make(map[string]any, len(b))
+	for k, v := range b {
+		bonus[k] = v
 	}
 	return bonus
 }
@@ -394,7 +333,7 @@ func modApplyLevel(inst, raw map[string]any) {
 		}
 		inst["生效"] = scaled
 	}
-	// 词条数值只从加成读取（旧格式顶层直挂数值已折叠进加成表）；键排序保证属性键表确定性。
+	// 词条数值直接取 加成 表；键排序保证属性键表确定性。
 	bonus := modBonus(raw)
 	baseKeys := make([]string, 0, len(bonus))
 	for prop := range bonus {
