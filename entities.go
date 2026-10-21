@@ -1092,6 +1092,10 @@ func LevelSkillFieldsWithAttr(skill map[string]any, attrs map[string]any, rules 
 	if rng == 0 {
 		rng = 1
 	}
+	spd := NumD(attrs["技能速度"], 0)
+	if spd == 0 {
+		spd = 1
+	}
 	multi := 1.0
 	if len(rangedMulti) > 0 {
 		multi = rangedMulti[0]
@@ -1159,6 +1163,9 @@ func LevelSkillFieldsWithAttr(skill map[string]any, attrs map[string]any, rules 
 				} else {
 					val = Num(fm["值"]) * (2 - eff)
 				}
+			}
+			if hasStr(props, "技能速度") {
+				val = val / spd
 			}
 			if hasStr(props, "多重") {
 				// 多重影响：读取远程武器多重射击属性（1 开始，无远程武器时为 1，即无加成）
