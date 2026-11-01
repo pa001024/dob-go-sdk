@@ -46,16 +46,15 @@ func TestCalcPerfOnlineBatch(t *testing.T) {
 				t.Fatal(err)
 			}
 			engine := NewEngine(state, tables)
-			skipped := dotDependent(settings)
 			tf, _ := settings["targetFunction"].(string)
-			if !skipped[tf] {
+			if tf != "" {
 				if tw, ok := want["target"]; ok && IsNum(tw) {
 					if got := engine.Calculate(""); !isClose(got, Num(tw)) {
 						t.Fatalf("%s target: mine=%v ref=%v", file, got, Num(tw))
 					}
 				}
 			}
-			_ = engine.CalculateWeaponAttributes(nil, false, false)
+			_ = engine.CalculateWeaponAttributes()
 		}
 		samples = append(samples, time.Since(start))
 	}
@@ -87,7 +86,7 @@ func TestCalcPerfShardBatch(t *testing.T) {
 				t.Fatalf("%s: mine=%v ref=%v", name, got, Num(cm["ts"]))
 			}
 		}
-		_ = engine.CalculateWeaponAttributes(nil, false, false)
+		_ = engine.CalculateWeaponAttributes()
 		samples = append(samples, time.Since(start))
 	}
 	b := best(samples)

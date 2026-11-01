@@ -23,17 +23,27 @@ const (
 	perfRounds       = 3
 )
 
-func pinPackDir(t *testing.T) string {
+// pinPackZip 钉住版本包路径：历史路径 mock/data-pack，现行 apps/web/mock/data-pack。
+func pinPackZip(t *testing.T) string {
 	t.Helper()
 	// sdk/go → 仓库根：../..
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
-	mock := filepath.Join(root, "mock", "data-pack", pinVersion+".zip")
-	if _, err := os.Stat(mock); err != nil {
-		t.Skipf("mock 包缺失: %v", err)
+	for _, rel := range []string{filepath.Join("mock", "data-pack"), filepath.Join("apps", "web", "mock", "data-pack")} {
+		mock := filepath.Join(root, rel, pinVersion+".zip")
+		if _, err := os.Stat(mock); err == nil {
+			return mock
+		}
 	}
+	t.Skipf("mock 包缺失: %s", filepath.Join(root, "mock", "data-pack", pinVersion+".zip"))
+	return ""
+}
+
+func pinPackDir(t *testing.T) string {
+	t.Helper()
+	mock := pinPackZip(t)
 	cache, err := os.MkdirTemp("", "dob-perf")
 	if err != nil {
 		t.Fatal(err)

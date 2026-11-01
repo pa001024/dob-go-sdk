@@ -52,7 +52,7 @@ func TestShardbuildParity(t *testing.T) {
 func TestShardbuildAttrs(t *testing.T) {
 	engine, expr, _ := buildShardEngine(t)
 	want := expr["expectedAttrs"].(map[string]any)
-	got := engine.CalculateWeaponAttributes(nil, false, false)
+	got := engine.CalculateWeaponAttributes()
 	for k, wv := range want {
 		if k == "weapon" || !IsNum(wv) {
 			continue

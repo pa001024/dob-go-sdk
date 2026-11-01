@@ -19,7 +19,7 @@ type BuildSnapshot struct {
 // Attrs 全量角色属性（含 weapon 面板；首次计算后缓存）。
 func (s *BuildSnapshot) Attrs() map[string]any {
 	if s.attrs == nil {
-		s.attrs = s.Engine.CalculateWeaponAttributes(nil, false, false)
+		s.attrs = s.Engine.CalculateWeaponAttributes()
 	}
 	return s.attrs
 }

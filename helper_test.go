@@ -2,6 +2,7 @@
 package dob
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -72,4 +73,23 @@ func assertClose(t *testing.T, what string, got, want float64) {
 	if !isClose(got, want) {
 		t.Errorf("%s: mine=%v ref=%v", what, got, want)
 	}
+}
+
+func valuesEqual(a, b V) bool {
+	if IsNum(a) && IsNum(b) {
+		return Num(a) == Num(b)
+	}
+	return fmt.Sprint(a) == fmt.Sprint(b)
+}
+
+func mapsEqual(a, b map[string]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || !valuesEqual(v, bv) {
+			return false
+		}
+	}
+	return true
 }

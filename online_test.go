@@ -65,58 +65,6 @@ func onlineTables(t *testing.T) *GameDataTables {
 	return tables
 }
 
-// referencedVars 表达式引用的自定义变量名（IDENT 精确匹配）。
-func referencedVars(body string, names map[string]bool) map[string]bool {
-	out := map[string]bool{}
-	toks, err := TokenizeAST(body, -1)
-	if err != nil {
-		return out
-	}
-	for _, tok := range toks {
-		if tok.Kind == TokIdent && names[tok.Value] {
-			out[tok.Value] = true
-		}
-	}
-	return out
-}
-
-// dotDependent 传递引用 DOT伤害 的变量集合。
-func dotDependent(settings map[string]any) map[string]bool {
-	var entries [][2]string
-	names := map[string]bool{}
-	for _, e := range AsList(settings["customVariables"]) {
-		pair, _ := e.([]any)
-		if len(pair) < 2 {
-			continue
-		}
-		k, _ := pair[0].(string)
-		v, _ := pair[1].(string)
-		entries = append(entries, [2]string{k, v})
-		names[k] = true
-	}
-	closure := map[string]bool{}
-	for _, e := range entries {
-		if strings.Contains(e[1], "DOT伤害") {
-			closure[e[0]] = true
-		}
-	}
-	for changed := true; changed; {
-		changed = false
-		for _, e := range entries {
-			if closure[e[0]] {
-				continue
-			}
-			for r := range referencedVars(e[1], closure) {
-				_ = r
-				closure[e[0]] = true
-				changed = true
-				break
-			}
-		}
-	}
-	return closure
-}
-
 func TestOnlineTargets(t *testing.T) {
 	tables := onlineTables(t)
 	expected := loadGolden(t, "online_expected.json").(map[string]any)["expected"].(map[string]any)
@@ -132,13 +80,9 @@ func TestOnlineTargets(t *testing.T) {
 				t.Fatal(err)
 			}
 			engine := NewEngine(state, tables)
-			skipped := dotDependent(settings)
-			if len(skipped) > 0 {
-				t.Logf("%s: 跳过 %d 个 DOT 依赖变量", key, len(skipped))
-			}
 			matched := 0
 			for name, wv := range AsMap(want["vars"]) {
-				if skipped[name] || !IsNum(wv) {
+				if !IsNum(wv) {
 					continue
 				}
 				var got float64
@@ -162,12 +106,12 @@ func TestOnlineTargets(t *testing.T) {
 			if matched == 0 {
 				t.Errorf("%s 无有效变量断言", file)
 			}
-			if tf, ok := settings["targetFunction"].(string); ok && tf != "" && !skipped[tf] {
+			if tf, ok := settings["targetFunction"].(string); ok && tf != "" {
 				if tw, ok := want["target"]; ok && IsNum(tw) {
 					assertClose(t, file+" target", engine.Calculate(""), Num(tw))
 				}
 			}
-			gotAttrs := engine.CalculateWeaponAttributes(nil, false, false)
+			gotAttrs := engine.CalculateWeaponAttributes()
 			for attr, wv := range AsMap(want["attrs"]) {
 				if attr == "weapon" || !IsNum(wv) {
 					continue
@@ -182,6 +126,8 @@ func TestOnlineTargets(t *testing.T) {
 }
 
 func TestConditionalBuffFiltering(t *testing.T) {
+	// 条件 BUFF（buff.技能 + code）经字段级合并生效：Svmqw3LGoY 的琳恩裂伤特性
+	// 只作用于「裂伤」字段，[引爆]单次走条件 code 路径，与真机一致即证明合并生效。
 	tables := onlineTables(t)
 	expected := loadGolden(t, "online_expected.json").(map[string]any)["expected"].(map[string]any)
 	payload := loadGolden(t, "online/Svmqw3LGoY.json").(map[string]any)
@@ -191,32 +137,6 @@ func TestConditionalBuffFiltering(t *testing.T) {
 		t.Fatal(err)
 	}
 	engine := NewEngine(state, tables)
-	var globalNames, dynamicNames []string
-	for _, b := range AsList(state["buffs"]) {
-		if m, ok := b.(map[string]any); ok {
-			globalNames = append(globalNames, S(m, "名称"))
-		}
-	}
-	for _, b := range AsList(state["dynamicBuffs"]) {
-		if m, ok := b.(map[string]any); ok {
-			dynamicNames = append(dynamicNames, S(m, "名称"))
-		}
-	}
-	if !hasStr(dynamicNames, "琳恩裂伤特性") {
-		t.Errorf("条件 BUFF 应在 dynamicBuffs: %v", dynamicNames)
-	}
-	if hasStr(globalNames, "琳恩裂伤特性") {
-		t.Errorf("条件 BUFF 不应进全局 buffs")
-	}
-	found := false
-	for _, r := range engine.ConditionalList() {
-		if r.Skill == "裂伤" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("裂伤条件规则缺失")
-	}
 	want := Num(AsMap(AsMap(expected["Svmqw3LGoY"])["vars"])["[引爆]单次"])
 	assertClose(t, "[引爆]单次", engine.Calculate("[引爆]单次"), want)
 }

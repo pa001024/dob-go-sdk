@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -37,7 +38,7 @@ func (f *fakeTableGameData) IterAll(dataset string, q GameDataQuery, yield func(
 	values := f.values[dataset]
 	var items []any
 	for i, v := range values {
-		items = append(items, map[string]any{"key": itoa(i), "data": v})
+		items = append(items, map[string]any{"key": strconv.Itoa(i), "data": v})
 	}
 	yield(map[string]any{"total": len(values), "items": items})
 	return nil

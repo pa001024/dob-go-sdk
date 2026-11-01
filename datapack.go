@@ -27,7 +27,7 @@ const (
 	// DefaultVersionsFile 版本列表文件名。
 	DefaultVersionsFile = "versions.json"
 	// DataPackFormatMajor 数据包格式 major：与打包侧统一自增，改动包格式、老读包侧会崩时加一。
-	DataPackFormatMajor = 2
+	DataPackFormatMajor = 3
 	// DataPackLegacyCutoffVersion 历史分割线：自该版起 MOD 数值挪进加成，缺 major 的老条目按此推断。
 	DataPackLegacyCutoffVersion = "1.6.208.7"
 )

@@ -134,12 +134,14 @@ func TestWeaponPanel(t *testing.T) {
 		t.Fatalf("装配失败: %v", err)
 	}
 	engine := NewEngine(state, tables)
-	standalone := engine.WeaponPanels()
 	for _, pair := range [][2]string{{"melee", "近战"}, {"ranged", "远程"}, {"skill", "同律"}} {
 		got := engine.WeaponPanel(pair[0])
-		want, _ := standalone[pair[1]].(map[string]any)
+		want := engine.WeaponPanel(pair[1])
 		if !mapsEqual(got, want) {
-			t.Errorf("weapon_panel(%s) 与上下文面板不一致", pair[0])
+			t.Errorf("weapon_panel(%s) 与别名不一致", pair[0])
+		}
+		if len(got) == 0 {
+			t.Errorf("weapon_panel(%s) 为空", pair[0])
 		}
 	}
 	if engine.WeaponPanel("不存在的槽位") != nil {
