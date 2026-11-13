@@ -1,4 +1,4 @@
-// wasm 计算后端：把 dob-calc-core 编译产物直接嵌入 Go 进程（wazero 即时实例化）。
+// wasm 计算后端：把 dob-calc-core 编译产物直接嵌入 Go 进程（wazero 即时实例化，纯 Go 无需 cgo）。
 //
 // 与纯 Go Engine 的分工：数据加载（DataPackStore / ModuleStore /
 // GameDataTables）仍走 Go，只把最热的「装配 + 属性 + 面板 + 目标函数」
@@ -18,13 +18,14 @@ import (
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
+	"github.com/tetratelabs/wazero/experimental"
 )
 
 //go:embed _wasm/dob_calc_core.wasm
 var dobCalcWasm []byte
 
 // WasmPackageVersion 随包 wasm 对应的 dob-calc-core 版本。
-const WasmPackageVersion = "dob-calc-core 0.2.1"
+const WasmPackageVersion = "dob-calc-core 0.2.4"
 
 // WasmEvaluateError wasm 求值返回 ok:false 信封。
 type WasmEvaluateError struct{ Message string }
@@ -96,7 +97,10 @@ func IsTrue(v any) bool {
 // NewWasmBackend 建表会话（modules JSON 注表 + 计算会话）。
 func NewWasmBackend(tables *GameDataTables) (*WasmBackend, error) {
 	ctx := context.Background()
-	runtime := wazero.NewRuntime(ctx)
+	// -Oz 产物含 tail-call 与 typed function references：wazero 默认仅启用 CoreFeaturesV2，
+	// 需显式开启 experimental 特性（wazero 自带 spectest 覆盖，无需 cgo 换库）。
+	runtime := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().
+		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesTailCall | experimental.CoreFeaturesTypedFunctionReferences))
 	mod, err := runtime.InstantiateWithConfig(ctx, dobCalcWasm, wazero.NewModuleConfig())
 	if err != nil {
 		runtime.Close(ctx)
